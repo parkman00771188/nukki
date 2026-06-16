@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+
+build/
+dist/
+
+ChatGPT Image *.png
+
+.venv/
+venv/
+env/
+
+*.log

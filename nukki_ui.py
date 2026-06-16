@@ -408,6 +408,18 @@ def has_local_drop_urls(event) -> bool:
     return any(bool(url.toLocalFile()) for url in event.mimeData().urls())
 
 
+def set_drag_active_style(widget: QWidget | None, active: bool) -> None:
+    if widget is None:
+        return
+    value = "true" if active else "false"
+    if widget.property("dragActive") == value:
+        return
+    widget.setProperty("dragActive", value)
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
+    widget.update()
+
+
 class QueueListWidget(QListWidget):
     files_dropped = Signal(list)
 
@@ -448,20 +460,30 @@ class DropAreaButton(QPushButton):
     def __init__(self, text: str) -> None:
         super().__init__(text)
         self.setAcceptDrops(True)
+        set_drag_active_style(self, False)
 
     def dragEnterEvent(self, event) -> None:  # type: ignore[override]
         if has_local_drop_urls(event):
+            set_drag_active_style(self, True)
             event.acceptProposedAction()
             return
+        set_drag_active_style(self, False)
         event.ignore()
 
     def dragMoveEvent(self, event) -> None:  # type: ignore[override]
         if has_local_drop_urls(event):
+            set_drag_active_style(self, True)
             event.acceptProposedAction()
             return
+        set_drag_active_style(self, False)
         event.ignore()
 
+    def dragLeaveEvent(self, event) -> None:  # type: ignore[override]
+        set_drag_active_style(self, False)
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event) -> None:  # type: ignore[override]
+        set_drag_active_style(self, False)
         paths = supported_paths_from_urls(event.mimeData().urls())
         if paths:
             self.files_dropped.emit(paths)
@@ -476,20 +498,33 @@ class ImageDropFrame(QFrame):
     def __init__(self) -> None:
         super().__init__()
         self.setAcceptDrops(True)
+        self.drag_highlight_target: QWidget | None = None
+
+    def set_drag_highlight_target(self, widget: QWidget | None) -> None:
+        self.drag_highlight_target = widget
 
     def dragEnterEvent(self, event) -> None:  # type: ignore[override]
         if has_local_drop_urls(event):
+            set_drag_active_style(self.drag_highlight_target, True)
             event.acceptProposedAction()
             return
+        set_drag_active_style(self.drag_highlight_target, False)
         event.ignore()
 
     def dragMoveEvent(self, event) -> None:  # type: ignore[override]
         if has_local_drop_urls(event):
+            set_drag_active_style(self.drag_highlight_target, True)
             event.acceptProposedAction()
             return
+        set_drag_active_style(self.drag_highlight_target, False)
         event.ignore()
 
+    def dragLeaveEvent(self, event) -> None:  # type: ignore[override]
+        set_drag_active_style(self.drag_highlight_target, False)
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event) -> None:  # type: ignore[override]
+        set_drag_active_style(self.drag_highlight_target, False)
         paths = supported_paths_from_urls(event.mimeData().urls())
         if paths:
             self.files_dropped.emit(paths)
@@ -966,6 +1001,7 @@ class NukkiWindow(QMainWindow):
         self.add_button.setObjectName("uploadButton")
         self.add_button.clicked.connect(self.select_files)
         self.add_button.files_dropped.connect(self.add_files)
+        card.set_drag_highlight_target(self.add_button)
 
         self.remove_button = QPushButton(REMOVE_SELECTED)
         self.remove_button.setObjectName("subButton")
@@ -1274,6 +1310,12 @@ class NukkiWindow(QMainWindow):
             #uploadButton:hover {
                 background: #fff9f5;
                 border-color: #ff6a00;
+            }
+            #uploadButton[dragActive="true"] {
+                background: #fff1e6;
+                border: 2px dashed #ff5a00;
+                color: #ff5a00;
+                font: 800 18px "Malgun Gothic";
             }
             #subButton, #browseButton {
                 background: #ffffff;

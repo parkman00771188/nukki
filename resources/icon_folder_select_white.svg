@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 256 256">
+  
+    <defs>
+      <linearGradient id="a9_orange" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#FF9A1F"/>
+        <stop offset="45%" stop-color="#FF6A00"/>
+        <stop offset="100%" stop-color="#FF3D00"/>
+      </linearGradient>
+      <linearGradient id="a9_blue" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#A9D8FF"/>
+        <stop offset="100%" stop-color="#4A90E2"/>
+      </linearGradient>
+      <linearGradient id="a9_purple" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#B7A7FF"/>
+        <stop offset="100%" stop-color="#7C5CFF"/>
+      </linearGradient>
+      <linearGradient id="a9_grey" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#F4F6F8"/>
+        <stop offset="100%" stop-color="#D7DEE7"/>
+      </linearGradient>
+      <filter id="a9_shadow" x="-30%" y="-30%" width="160%" height="170%">
+        <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#1F2937" flood-opacity="0.13"/>
+      </filter>
+      <filter id="a9_softshadow" x="-30%" y="-30%" width="160%" height="170%">
+        <feDropShadow dx="0" dy="5" stdDeviation="6" flood-color="#FF6A00" flood-opacity="0.20"/>
+      </filter>
+    </defs>
+    
+  <rect width="256" height="256" fill="#FFFFFF"/>
+  
+    <g filter="url(#a9_shadow)">
+      <path d="M58 85 a14 14 0 0 1 14 -14 h47 l18 22 h47 a14 14 0 0 1 14 14 v65 a14 14 0 0 1 -14 14 H72 a14 14 0 0 1 -14 -14 Z" fill="#FFFFFF" stroke="#D5DCE4" stroke-width="7"/>
+      <path d="M58 111 h140 v63 a14 14 0 0 1 -14 14 H72 a14 14 0 0 1 -14 -14 Z" fill="#FFF2E7" stroke="#FF7A00" stroke-width="7"/>
+      <path d="M93 147 h70" stroke="#FF7A00" stroke-width="9" stroke-linecap="round"/>
+      <path d="M128 126 v42" stroke="#FF7A00" stroke-width="9" stroke-linecap="round"/>
+    </g>
+    
+</svg>

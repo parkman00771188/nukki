@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 256 256">
+  
+    <defs>
+      <linearGradient id="a3_orange" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#FF9A1F"/>
+        <stop offset="45%" stop-color="#FF6A00"/>
+        <stop offset="100%" stop-color="#FF3D00"/>
+      </linearGradient>
+      <linearGradient id="a3_blue" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#A9D8FF"/>
+        <stop offset="100%" stop-color="#4A90E2"/>
+      </linearGradient>
+      <linearGradient id="a3_purple" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#B7A7FF"/>
+        <stop offset="100%" stop-color="#7C5CFF"/>
+      </linearGradient>
+      <linearGradient id="a3_grey" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#F4F6F8"/>
+        <stop offset="100%" stop-color="#D7DEE7"/>
+      </linearGradient>
+      <filter id="a3_shadow" x="-30%" y="-30%" width="160%" height="170%">
+        <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#1F2937" flood-opacity="0.13"/>
+      </filter>
+      <filter id="a3_softshadow" x="-30%" y="-30%" width="160%" height="170%">
+        <feDropShadow dx="0" dy="5" stdDeviation="6" flood-color="#FF6A00" flood-opacity="0.20"/>
+      </filter>
+    </defs>
+    
+  <rect width="256" height="256" fill="#FFFFFF"/>
+  
+    <g filter="url(#a3_shadow)">
+      <rect x="52" y="58" width="132" height="102" rx="22" fill="url(#a3_orange)"/>
+      <rect x="68" y="76" width="96" height="64" rx="14" fill="#FFFFFF" opacity="0.96"/>
+      <circle cx="96" cy="99" r="10" fill="#FFB15C"/>
+      <path d="M76 139 l30 -30 l20 19 l14 -14 l28 25 Z" fill="#FF7A00" opacity="0.92"/>
+      <circle cx="176" cy="156" r="34" fill="#FFFFFF" stroke="#FF6A00" stroke-width="8"/>
+      <line x1="176" y1="139" x2="176" y2="173" stroke="#FF6A00" stroke-width="10" stroke-linecap="round"/>
+      <line x1="159" y1="156" x2="193" y2="156" stroke="#FF6A00" stroke-width="10" stroke-linecap="round"/>
+      <path d="M54 36.8 L56.34 41.66 L61.2 44 L56.34 46.34 L54 51.2 L51.66 46.34 L46.8 44 L51.66 41.66 Z" fill="#FFB15C"/>
+      <path d="M201 84.4 L202.82 88.18 L206.6 90 L202.82 91.82 L201 95.6 L199.18 91.82 L195.4 90 L199.18 88.18 Z" fill="#FFD3A4"/>
+    </g>
+    
+</svg>

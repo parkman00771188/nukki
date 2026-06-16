@@ -20,6 +20,7 @@ python -m PyInstaller ^
     --clean ^
     --windowed ^
     --name Nukki ^
+    --add-data "resources;resources" ^
     nukki_ui.py
 
 if errorlevel 1 (

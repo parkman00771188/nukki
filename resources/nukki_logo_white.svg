@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 256 256">
+  
+    <defs>
+      <linearGradient id="a0_orange" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#FF9A1F"/>
+        <stop offset="45%" stop-color="#FF6A00"/>
+        <stop offset="100%" stop-color="#FF3D00"/>
+      </linearGradient>
+      <linearGradient id="a0_blue" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#A9D8FF"/>
+        <stop offset="100%" stop-color="#4A90E2"/>
+      </linearGradient>
+      <linearGradient id="a0_purple" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#B7A7FF"/>
+        <stop offset="100%" stop-color="#7C5CFF"/>
+      </linearGradient>
+      <linearGradient id="a0_grey" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#F4F6F8"/>
+        <stop offset="100%" stop-color="#D7DEE7"/>
+      </linearGradient>
+      <filter id="a0_shadow" x="-30%" y="-30%" width="160%" height="170%">
+        <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#1F2937" flood-opacity="0.13"/>
+      </filter>
+      <filter id="a0_softshadow" x="-30%" y="-30%" width="160%" height="170%">
+        <feDropShadow dx="0" dy="5" stdDeviation="6" flood-color="#FF6A00" flood-opacity="0.20"/>
+      </filter>
+    </defs>
+    
+  <rect width="256" height="256" fill="#FFFFFF"/>
+  
+    <g filter="url(#a0_shadow)">
+      <clipPath id="a0_clip"><circle cx="128" cy="128" r="76"/></clipPath>
+      <circle cx="128" cy="128" r="76" fill="url(#a0_orange)"/>
+      <g clip-path="url(#a0_clip)" stroke="#FFFFFF" stroke-width="12" stroke-linecap="round" opacity="0.95">
+        <line x1="42" y1="80" x2="108" y2="24"/>
+        <line x1="37" y1="112" x2="142" y2="24"/>
+        <line x1="39" y1="145" x2="178" y2="28"/>
+        <line x1="51" y1="174" x2="207" y2="44"/>
+        <line x1="80" y1="190" x2="220" y2="74"/>
+        <line x1="112" y1="198" x2="224" y2="105"/>
+      </g>
+    </g>
+    
+</svg>

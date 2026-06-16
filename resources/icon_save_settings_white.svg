@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 256 256">
+  
+    <defs>
+      <linearGradient id="a8_orange" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#FF9A1F"/>
+        <stop offset="45%" stop-color="#FF6A00"/>
+        <stop offset="100%" stop-color="#FF3D00"/>
+      </linearGradient>
+      <linearGradient id="a8_blue" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#A9D8FF"/>
+        <stop offset="100%" stop-color="#4A90E2"/>
+      </linearGradient>
+      <linearGradient id="a8_purple" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#B7A7FF"/>
+        <stop offset="100%" stop-color="#7C5CFF"/>
+      </linearGradient>
+      <linearGradient id="a8_grey" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#F4F6F8"/>
+        <stop offset="100%" stop-color="#D7DEE7"/>
+      </linearGradient>
+      <filter id="a8_shadow" x="-30%" y="-30%" width="160%" height="170%">
+        <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#1F2937" flood-opacity="0.13"/>
+      </filter>
+      <filter id="a8_softshadow" x="-30%" y="-30%" width="160%" height="170%">
+        <feDropShadow dx="0" dy="5" stdDeviation="6" flood-color="#FF6A00" flood-opacity="0.20"/>
+      </filter>
+    </defs>
+    
+  <rect width="256" height="256" fill="#FFFFFF"/>
+  
+    <g filter="url(#a8_shadow)">
+      <path d="M128 52 l9 19 a60 60 0 0 1 17 7 l20 -7 l19 33 l-15 14 a62 62 0 0 1 0 20 l15 14 l-19 33 l-20 -7 a60 60 0 0 1 -17 7 l-9 19 h-38 l-9 -19 a60 60 0 0 1 -17 -7 l-20 7 l-19 -33 l15 -14 a62 62 0 0 1 0 -20 l-15 -14 l19 -33 l20 7 a60 60 0 0 1 17 -7 l9 -19 z" fill="url(#a8_orange)"/>
+      <circle cx="109" cy="128" r="39" fill="#FFFFFF" opacity="0.98"/>
+      <path d="M88 103 h42 l18 18 v32 a8 8 0 0 1 -8 8 H88 a8 8 0 0 1 -8 -8 v-42 a8 8 0 0 1 8 -8 Z" fill="#FF7A00"/>
+      <rect x="94" y="110" width="29" height="18" rx="3" fill="#FFFFFF" opacity="0.9"/>
+      <rect x="93" y="138" width="42" height="18" rx="4" fill="#FFFFFF" opacity="0.9"/>
+      <circle cx="109" cy="128" r="13" fill="#FFFFFF" opacity="0.22"/>
+    </g>
+    
+</svg>

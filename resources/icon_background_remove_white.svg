@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 256 256">
+  
+    <defs>
+      <linearGradient id="a1_orange" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#FF9A1F"/>
+        <stop offset="45%" stop-color="#FF6A00"/>
+        <stop offset="100%" stop-color="#FF3D00"/>
+      </linearGradient>
+      <linearGradient id="a1_blue" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#A9D8FF"/>
+        <stop offset="100%" stop-color="#4A90E2"/>
+      </linearGradient>
+      <linearGradient id="a1_purple" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#B7A7FF"/>
+        <stop offset="100%" stop-color="#7C5CFF"/>
+      </linearGradient>
+      <linearGradient id="a1_grey" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#F4F6F8"/>
+        <stop offset="100%" stop-color="#D7DEE7"/>
+      </linearGradient>
+      <filter id="a1_shadow" x="-30%" y="-30%" width="160%" height="170%">
+        <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#1F2937" flood-opacity="0.13"/>
+      </filter>
+      <filter id="a1_softshadow" x="-30%" y="-30%" width="160%" height="170%">
+        <feDropShadow dx="0" dy="5" stdDeviation="6" flood-color="#FF6A00" flood-opacity="0.20"/>
+      </filter>
+    </defs>
+    
+  <rect width="256" height="256" fill="#FFFFFF"/>
+  
+    <g filter="url(#a1_shadow)">
+      <rect x="50" y="46" width="156" height="156" rx="34" fill="url(#a1_orange)"/>
+      <g opacity="0.16" fill="#FFFFFF">
+        <circle cx="86" cy="82" r="5"/><circle cx="107" cy="82" r="5"/><circle cx="128" cy="82" r="5"/>
+        <circle cx="86" cy="103" r="5"/><circle cx="107" cy="103" r="5"/>
+        <circle cx="86" cy="124" r="5"/>
+      </g>
+      <g transform="rotate(-38 130 128)">
+        <rect x="118" y="73" width="24" height="95" rx="12" fill="#FFFFFF"/>
+        <rect x="123" y="83" width="14" height="18" rx="6" fill="#FFD3B4"/>
+      </g>
+      <path d="M96 155 L160 91" stroke="#FFFFFF" stroke-width="12" stroke-linecap="round"/>
+      <path d="M144 73 l8 -16 l8 16 l16 8 l-16 8 l-8 16 l-8 -16 l-16 -8 z" fill="#FFFFFF"/>
+      <path d="M83 75 l5 -10 l5 10 l10 5 l-10 5 l-5 10 l-5 -10 l-10 -5 z" fill="#FFFFFF" opacity="0.92"/>
+      <path d="M175 148 l5 -10 l5 10 l10 5 l-10 5 l-5 10 l-5 -10 l-10 -5 z" fill="#FFFFFF" opacity="0.92"/>
+      <circle cx="180" cy="86" r="4" fill="#FFFFFF" opacity="0.9"/>
+    </g>
+    
+</svg>

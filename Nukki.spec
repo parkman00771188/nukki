@@ -5,7 +5,7 @@ a = Analysis(
     ['nukki_ui.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('resources', 'resources')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

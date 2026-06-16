@@ -6,6 +6,7 @@ import sys
 import traceback
 from dataclasses import replace
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, QSize, Qt, QStandardPaths, QThread, Signal, Slot
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QSizePolicy,
+    QStackedLayout,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -73,6 +75,7 @@ IMAGE_FILE_DIALOG_FILTER = (
     "*.tif *.tiff *.ico *.ppm *.pgm *.pbm *.pnm *.tga *.avif);;All files (*)"
 )
 OUTPUT_HISTORY_LIMIT = 6
+APP_VERSION = "v1.0.0"
 DEFAULT_CROP_ENABLED = False
 DEFAULT_OPEN_FOLDER_ENABLED = True
 PROCESS_MODE_BACKGROUND = "background"
@@ -82,7 +85,7 @@ SCAN_OUTPUT_SUFFIX = "_scan"
 
 APP_SUBTITLE = "\uc774\ubbf8\uc9c0 \ubc30\uacbd \uc81c\uac70 \ud504\ub85c\uadf8\ub7a8"
 UPLOAD_TITLE = "\uc774\ubbf8\uc9c0 \ucd94\uac00"
-UPLOAD_BUTTON = "+    \ud30c\uc77c \ucd94\uac00 \ub610\ub294 \ub4dc\ub798\uadf8\nJPG, PNG, WEBP \ub4f1 \uc774\ubbf8\uc9c0 \ud30c\uc77c\uc744 \ucd94\uac00\ud558\uc138\uc694."
+UPLOAD_BUTTON = "\ud30c\uc77c \ucd94\uac00 \ub610\ub294 \ub4dc\ub798\uadf8\nJPG, PNG, WEBP \ub4f1 \uc774\ubbf8\uc9c0 \ud30c\uc77c\uc744 \ucd94\uac00\ud558\uc138\uc694."
 REMOVE_SELECTED = "\uc120\ud0dd \uc0ad\uc81c"
 CLEAR_ALL = "\uc804\uccb4 \uc0ad\uc81c"
 OUTPUT_TITLE = "\uc800\uc7a5 \uc124\uc815"
@@ -141,6 +144,62 @@ def default_output_dir() -> Path:
     if documents_dir:
         return Path(documents_dir) / "Nukki Output"
     return Path.cwd() / "output"
+
+
+def resource_base_dir() -> Path:
+    frozen_base = getattr(sys, "_MEIPASS", None)
+    if frozen_base:
+        return Path(frozen_base) / "resources"
+    return Path(__file__).resolve().parent / "resources"
+
+
+def resource_path(name: str) -> Path:
+    return resource_base_dir() / name
+
+
+def asset_pixmap(name: str, size: int | QSize, mode: Qt.AspectRatioMode = Qt.AspectRatioMode.KeepAspectRatio) -> QPixmap:
+    target_size = size if isinstance(size, QSize) else QSize(size, size)
+    path = resource_path(name)
+    pixmap = cropped_asset_pixmap(path)
+    if pixmap.isNull():
+        pixmap = QPixmap(str(path))
+    if pixmap.isNull():
+        fallback = QPixmap(target_size)
+        fallback.fill(Qt.GlobalColor.transparent)
+        return fallback
+    return pixmap.scaled(target_size, mode, Qt.TransformationMode.SmoothTransformation)
+
+
+def asset_icon(name: str) -> QIcon:
+    pixmap = asset_pixmap(name, 512)
+    return QIcon(pixmap) if not pixmap.isNull() else QIcon()
+
+
+def cropped_asset_pixmap(path: Path) -> QPixmap:
+    if path.suffix.lower() != ".png" or not path.exists():
+        return QPixmap()
+    try:
+        with Image.open(path) as image:
+            rgba = image.convert("RGBA")
+            rgb = rgba.convert("RGB")
+            mask = rgb.point(lambda value: 255 if value < 248 else 0).convert("L")
+            bbox = mask.getbbox()
+            if bbox is None:
+                return QPixmap(str(path))
+            left, top, right, bottom = bbox
+            pad = 8
+            left = max(0, left - pad)
+            top = max(0, top - pad)
+            right = min(rgba.width, right + pad)
+            bottom = min(rgba.height, bottom + pad)
+            cropped = rgba.crop((left, top, right, bottom))
+            buffer = BytesIO()
+            cropped.save(buffer, format="PNG")
+            pixmap = QPixmap()
+            pixmap.loadFromData(buffer.getvalue(), "PNG")
+            return pixmap
+    except (OSError, ValueError):
+        return QPixmap(str(path))
 
 
 def load_settings() -> dict:
@@ -311,6 +370,8 @@ def create_control_pixmap(kind: str, size: int = 28, color: str = "#4d5159") -> 
         painter.drawEllipse(center, size * 0.28, size * 0.28)
     elif kind == "minimize":
         painter.drawLine(QPointF(size * 0.25, size * 0.55), QPointF(size * 0.75, size * 0.55))
+    elif kind == "maximize":
+        painter.drawRoundedRect(QRectF(size * 0.34, size * 0.34, size * 0.34, size * 0.34), 2, 2)
     elif kind == "close":
         painter.drawLine(QPointF(size * 0.28, size * 0.28), QPointF(size * 0.72, size * 0.72))
         painter.drawLine(QPointF(size * 0.72, size * 0.28), QPointF(size * 0.28, size * 0.72))
@@ -374,6 +435,51 @@ def make_thumbnail(path: Path, size: int = 54) -> QPixmap:
         fallback.fill(QColor("#eef1f6"))
         return rounded_pixmap(fallback, size, size, 16)
     return rounded_pixmap(pixmap, size, size, 16)
+
+
+def build_title_row(icon_name: str, title_text: str, icon_size: int = 30) -> QWidget:
+    row = QWidget()
+    row.setObjectName("titleRow")
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(10)
+
+    icon = QLabel()
+    icon.setObjectName("sectionIcon")
+    icon.setPixmap(asset_pixmap(icon_name, icon_size))
+    icon.setFixedSize(icon_size, icon_size)
+    icon.setScaledContents(False)
+
+    title = QLabel(title_text)
+    title.setObjectName("cardTitle")
+
+    layout.addWidget(icon, 0, Qt.AlignmentFlag.AlignVCenter)
+    layout.addWidget(title, 0, Qt.AlignmentFlag.AlignVCenter)
+    return row
+
+
+def build_empty_state(image_name: str, message: str, image_size: int = 150) -> QWidget:
+    frame = QWidget()
+    frame.setObjectName("emptyState")
+    layout = QVBoxLayout(frame)
+    layout.setContentsMargins(16, 20, 16, 20)
+    layout.setSpacing(8)
+    layout.addStretch(1)
+
+    image = QLabel()
+    image.setObjectName("emptyStateImage")
+    image.setPixmap(asset_pixmap(image_name, image_size))
+    image.setFixedSize(image_size, image_size)
+    image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    label = QLabel(message)
+    label.setObjectName("emptyStateText")
+    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    layout.addWidget(image, 0, Qt.AlignmentFlag.AlignHCenter)
+    layout.addWidget(label)
+    layout.addStretch(1)
+    return frame
 
 
 def supported_paths_from_urls(urls) -> list[str]:
@@ -454,12 +560,14 @@ class QueueListWidget(QListWidget):
         event.ignore()
 
 
-class DropAreaButton(QPushButton):
+class DropAreaButton(QToolButton):
     files_dropped = Signal(list)
 
     def __init__(self, text: str) -> None:
-        super().__init__(text)
+        super().__init__()
+        self.setText(text)
         self.setAcceptDrops(True)
+        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         set_drag_active_style(self, False)
 
     def dragEnterEvent(self, event) -> None:  # type: ignore[override]
@@ -790,7 +898,7 @@ class NukkiWindow(QMainWindow):
         self.setAcceptDrops(True)
         self.setMinimumSize(1360, 780)
         self.resize(1480, 835)
-        self.setWindowIcon(QIcon(create_logo_pixmap(64)))
+        self.setWindowIcon(asset_icon("nukki_logo_white.png"))
 
         self._build_ui()
         self._load_settings_into_ui()
@@ -813,6 +921,12 @@ class NukkiWindow(QMainWindow):
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
         self._drag_start_position = None
         super().mouseReleaseEvent(event)
+
+    def toggle_maximized(self) -> None:
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
 
     def dragEnterEvent(self, event) -> None:  # type: ignore[override]
         if has_local_drop_urls(event):
@@ -869,8 +983,8 @@ class NukkiWindow(QMainWindow):
         layout.setSpacing(18)
 
         logo = QLabel()
-        logo.setPixmap(create_logo_pixmap(62))
-        logo.setFixedSize(62, 62)
+        logo.setPixmap(asset_pixmap("nukki_logo_white.png", 72))
+        logo.setFixedSize(72, 72)
 
         brand_column = QVBoxLayout()
         brand_column.setContentsMargins(0, 0, 0, 0)
@@ -895,6 +1009,12 @@ class NukkiWindow(QMainWindow):
         minimize_button.setIconSize(QSize(30, 30))
         minimize_button.clicked.connect(self.showMinimized)
 
+        maximize_button = QToolButton()
+        maximize_button.setObjectName("windowButton")
+        maximize_button.setIcon(QIcon(create_control_pixmap("maximize", 34)))
+        maximize_button.setIconSize(QSize(30, 30))
+        maximize_button.clicked.connect(self.toggle_maximized)
+
         close_button = QToolButton()
         close_button.setObjectName("windowButton")
         close_button.setIcon(QIcon(create_control_pixmap("close", 34)))
@@ -907,17 +1027,18 @@ class NukkiWindow(QMainWindow):
         layout.addWidget(self.settings_button, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addSpacing(16)
         layout.addWidget(minimize_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(maximize_button, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(close_button, 0, Qt.AlignmentFlag.AlignVCenter)
         return header
 
     def _build_sidebar(self) -> QFrame:
         sidebar = QFrame()
         sidebar.setObjectName("sidebarFrame")
-        sidebar.setFixedWidth(150)
+        sidebar.setFixedWidth(188)
 
         layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(22, 22, 22, 18)
-        layout.setSpacing(14)
+        layout.setContentsMargins(18, 22, 18, 20)
+        layout.setSpacing(16)
 
         self.mode_group = QButtonGroup(self)
         self.mode_group.setExclusive(True)
@@ -925,8 +1046,8 @@ class NukkiWindow(QMainWindow):
         self.background_button = QToolButton()
         self.background_button.setObjectName("navButton")
         self.background_button.setText("\ubc30\uacbd\uc81c\uac70")
-        self.background_button.setIcon(QIcon(create_background_pixmap(52)))
-        self.background_button.setIconSize(QSize(48, 48))
+        self.background_button.setIcon(asset_icon("icon_background_remove_white.png"))
+        self.background_button.setIconSize(QSize(74, 74))
         self.background_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.background_button.setCheckable(True)
         self.background_button.clicked.connect(lambda: self._set_mode(PROCESS_MODE_BACKGROUND))
@@ -934,8 +1055,8 @@ class NukkiWindow(QMainWindow):
         self.scan_button = QToolButton()
         self.scan_button.setObjectName("navButton")
         self.scan_button.setText("\uc2a4\uce94 \uc774\ubbf8\uc9c0\n\ub9cc\ub4e4\uae30")
-        self.scan_button.setIcon(QIcon(create_scan_pixmap(52)))
-        self.scan_button.setIconSize(QSize(48, 48))
+        self.scan_button.setIcon(asset_icon("icon_scan_image_white.png"))
+        self.scan_button.setIconSize(QSize(74, 74))
         self.scan_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.scan_button.setCheckable(True)
         self.scan_button.clicked.connect(lambda: self._set_mode(PROCESS_MODE_SCAN))
@@ -946,6 +1067,34 @@ class NukkiWindow(QMainWindow):
         layout.addWidget(self.background_button, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         layout.addWidget(self.scan_button, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         layout.addStretch(1)
+
+        guide = QFrame()
+        guide.setObjectName("guideCard")
+        guide_layout = QVBoxLayout(guide)
+        guide_layout.setContentsMargins(12, 12, 12, 14)
+        guide_layout.setSpacing(8)
+
+        guide_image = QLabel()
+        guide_image.setPixmap(asset_pixmap("illust_quick_guide_white.png", 92))
+        guide_image.setFixedSize(92, 72)
+        guide_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        guide_text = QLabel("\ub354 \ube60\ub974\uace0 \uac04\ud3b8\ud558\uac8c\n\uc774\ubbf8\uc9c0\ub97c \ucc98\ub9ac\ud558\uc138\uc694!")
+        guide_text.setObjectName("guideText")
+        guide_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        guide_button = QPushButton("\uc0ac\uc6a9 \uac00\uc774\ub4dc  >")
+        guide_button.setObjectName("guideButton")
+
+        guide_layout.addWidget(guide_image, 0, Qt.AlignmentFlag.AlignHCenter)
+        guide_layout.addWidget(guide_text)
+        guide_layout.addWidget(guide_button)
+        layout.addWidget(guide)
+
+        version = QLabel(APP_VERSION)
+        version.setObjectName("versionLabel")
+        version.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(version)
         return sidebar
 
     def _build_content(self) -> QWidget:
@@ -994,11 +1143,12 @@ class NukkiWindow(QMainWindow):
         layout.setContentsMargins(28, 20, 28, 20)
         layout.setSpacing(14)
 
-        title = QLabel(UPLOAD_TITLE)
-        title.setObjectName("cardTitle")
+        title = build_title_row("icon_image_add_white.png", UPLOAD_TITLE, icon_size=34)
 
         self.add_button = DropAreaButton(UPLOAD_BUTTON)
         self.add_button.setObjectName("uploadButton")
+        self.add_button.setIcon(asset_icon("illust_upload_dropzone_white.png"))
+        self.add_button.setIconSize(QSize(146, 96))
         self.add_button.clicked.connect(self.select_files)
         self.add_button.files_dropped.connect(self.add_files)
         card.set_drag_highlight_target(self.add_button)
@@ -1023,8 +1173,7 @@ class NukkiWindow(QMainWindow):
         layout.setContentsMargins(22, 22, 22, 22)
         layout.setSpacing(18)
 
-        title = QLabel(OUTPUT_TITLE)
-        title.setObjectName("cardTitle")
+        title = build_title_row("icon_save_settings_white.png", OUTPUT_TITLE, icon_size=34)
 
         path_label = QLabel(OUTPUT_PATH_LABEL)
         path_label.setObjectName("fieldLabel")
@@ -1149,8 +1298,7 @@ class NukkiWindow(QMainWindow):
         header_row = QHBoxLayout()
         header_row.setSpacing(12)
 
-        title = QLabel(QUEUE_TITLE)
-        title.setObjectName("cardTitle")
+        title = build_title_row("icon_image_add_white.png", QUEUE_TITLE, icon_size=34)
 
         self.count_label = QLabel("(0 \ud30c\uc77c)")
         self.count_label.setObjectName("countChip")
@@ -1165,8 +1313,19 @@ class NukkiWindow(QMainWindow):
         self.queue_list.setObjectName("queueList")
         self.queue_list.files_dropped.connect(self.add_files)
 
+        self.queue_empty = build_empty_state(
+            "illust_empty_image_list_white.png",
+            "\ucd94\uac00\ub41c \uc774\ubbf8\uc9c0\uac00 \uc5ec\uae30\uc5d0 \ud45c\uc2dc\ub429\ub2c8\ub2e4.",
+            image_size=150,
+        )
+
+        self.queue_stack = QStackedLayout()
+        self.queue_stack.setContentsMargins(0, 0, 0, 0)
+        self.queue_stack.addWidget(self.queue_empty)
+        self.queue_stack.addWidget(self.queue_list)
+
         layout.addLayout(header_row)
-        layout.addWidget(self.queue_list, 1)
+        layout.addLayout(self.queue_stack, 1)
         return card
 
     def _build_log_card(self) -> QFrame:
@@ -1179,8 +1338,7 @@ class NukkiWindow(QMainWindow):
         header_row = QHBoxLayout()
         header_row.setSpacing(10)
 
-        chip = QLabel(LOG_TITLE)
-        chip.setObjectName("cardTitle")
+        chip = build_title_row("illust_log_empty_white.png", LOG_TITLE, icon_size=34)
 
         clear_button = QPushButton(CLEAR_LOG)
         clear_button.setObjectName("subButton")
@@ -1191,14 +1349,25 @@ class NukkiWindow(QMainWindow):
         mono = QFont("Consolas")
         mono.setPointSize(10)
         self.log_output.setFont(mono)
+        self.log_output.textChanged.connect(self._refresh_log_empty_state)
         clear_button.clicked.connect(self.log_output.clear)
+
+        self.log_empty = build_empty_state(
+            "illust_log_empty_white.png",
+            "\uc2e4\ud589 \ub85c\uadf8\uac00 \uc5ec\uae30\uc5d0 \ud45c\uc2dc\ub429\ub2c8\ub2e4.",
+            image_size=130,
+        )
+        self.log_stack = QStackedLayout()
+        self.log_stack.setContentsMargins(0, 0, 0, 0)
+        self.log_stack.addWidget(self.log_empty)
+        self.log_stack.addWidget(self.log_output)
 
         header_row.addWidget(chip)
         header_row.addStretch(1)
         header_row.addWidget(clear_button)
 
         layout.addLayout(header_row)
-        layout.addWidget(self.log_output, 1)
+        layout.addLayout(self.log_stack, 1)
         return card
 
     def _apply_styles(self) -> None:
@@ -1212,32 +1381,32 @@ class NukkiWindow(QMainWindow):
                 background: transparent;
             }
             #outerFrame {
-                background: #fbfaf8;
-                border: 1px solid #cfcfcf;
-                border-radius: 18px;
+                background: #fffaf6;
+                border: 1px solid #c9cfd8;
+                border-radius: 10px;
             }
             #headerFrame {
                 background: #ffffff;
-                border-top-left-radius: 18px;
-                border-top-right-radius: 18px;
+                border-top-left-radius: 10px;
+                border-top-right-radius: 10px;
                 border-bottom: 1px solid #e7e2dd;
             }
             #sidebarFrame {
-                background: #fbfaf8;
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1, stop: 0 #fff9f1, stop: 0.55 #fffdfb, stop: 1 #fff8ed);
                 border-right: 1px solid #ebe5df;
-                border-bottom-left-radius: 18px;
+                border-bottom-left-radius: 10px;
             }
             #contentFrame {
-                background: #fbfaf8;
-                border-bottom-right-radius: 18px;
+                background: #fffaf6;
+                border-bottom-right-radius: 10px;
             }
             #brandLabel {
                 color: #050505;
-                font: 800 32px "Malgun Gothic";
+                font: 800 30px "Malgun Gothic";
             }
             #subtitleLabel {
                 color: #4d5159;
-                font: 500 18px "Malgun Gothic";
+                font: 500 15px "Malgun Gothic";
             }
             #pageTitle {
                 color: #151515;
@@ -1245,12 +1414,18 @@ class NukkiWindow(QMainWindow):
             }
             #card {
                 background: #ffffff;
-                border: 1px solid #e8e2dc;
+                border: 1px solid #eadfd5;
                 border-radius: 14px;
             }
             #cardTitle {
                 color: #111111;
                 font: 800 18px "Malgun Gothic";
+            }
+            #titleRow {
+                background: transparent;
+            }
+            #sectionIcon {
+                background: transparent;
             }
             #fieldLabel {
                 color: #171717;
@@ -1266,7 +1441,8 @@ class NukkiWindow(QMainWindow):
                 padding: 0;
             }
             QToolButton#windowButton {
-                border: none;
+                background: #ffffff;
+                border: 1px solid transparent;
                 border-radius: 8px;
                 min-width: 38px;
                 max-width: 38px;
@@ -1276,16 +1452,17 @@ class NukkiWindow(QMainWindow):
             }
             QToolButton#windowButton:hover {
                 background: #f4f1ee;
+                border-color: #e5ddd6;
             }
             QToolButton#navButton {
                 background: #ffffff;
                 border: 1px solid #ece6df;
-                border-radius: 14px;
+                border-radius: 12px;
                 color: #151515;
-                font: 800 16px "Malgun Gothic";
-                min-width: 110px;
-                max-width: 110px;
-                min-height: 124px;
+                font: 900 18px "Malgun Gothic";
+                min-width: 142px;
+                max-width: 142px;
+                min-height: 164px;
                 padding: 12px 6px;
             }
             QToolButton#navButton:hover {
@@ -1294,8 +1471,32 @@ class NukkiWindow(QMainWindow):
             }
             QToolButton#navButton:checked {
                 border: 1px solid #ff8c45;
-                background: #fff7f0;
-                color: #111111;
+                background: #fff4e9;
+                color: #d74700;
+            }
+            #guideCard {
+                background: #fff8ed;
+                border: 1px solid #ffd9b8;
+                border-radius: 12px;
+            }
+            #guideText {
+                color: #4f5965;
+                font: 700 12px "Malgun Gothic";
+            }
+            #guideButton {
+                background: #ffffff;
+                border: 1px solid #ffb987;
+                border-radius: 7px;
+                color: #ff5a00;
+                font: 800 12px "Malgun Gothic";
+                min-height: 28px;
+            }
+            #guideButton:hover {
+                background: #fff1e7;
+            }
+            #versionLabel {
+                color: #9aa0a8;
+                font: 600 12px "Malgun Gothic";
             }
             #uploadButton {
                 background: #ffffff;
@@ -1303,8 +1504,8 @@ class NukkiWindow(QMainWindow):
                 border-radius: 12px;
                 color: #575b63;
                 font: 600 18px "Malgun Gothic";
-                min-height: 112px;
-                padding: 10px 18px;
+                min-height: 190px;
+                padding: 12px 18px;
                 text-align: center;
             }
             #uploadButton:hover {
@@ -1398,7 +1599,7 @@ class NukkiWindow(QMainWindow):
                 border-radius: 14px;
                 color: #ffffff;
                 font: 900 24px "Malgun Gothic";
-                min-width: 260px;
+                min-width: 300px;
                 min-height: 78px;
                 padding: 0 30px;
             }
@@ -1436,6 +1637,16 @@ class NukkiWindow(QMainWindow):
                 background: #ffffff;
                 border: none;
                 outline: none;
+            }
+            #emptyState {
+                background: transparent;
+            }
+            #emptyStateText {
+                color: #6f7680;
+                font: 700 14px "Malgun Gothic";
+            }
+            #emptyStateImage {
+                background: transparent;
             }
             QListWidget#queueList::item {
                 border: none;
@@ -1801,12 +2012,19 @@ class NukkiWindow(QMainWindow):
 
     def _refresh_count_label(self) -> None:
         self.count_label.setText(f"({len(self.queued_files)} \ud30c\uc77c)")
+        if hasattr(self, "queue_stack"):
+            self.queue_stack.setCurrentWidget(self.queue_list if self.queued_files else self.queue_empty)
 
     def append_log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_output.appendPlainText(f"[{timestamp}] {message}")
         scrollbar = self.log_output.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
+
+    def _refresh_log_empty_state(self) -> None:
+        if hasattr(self, "log_stack"):
+            has_log = bool(self.log_output.toPlainText().strip())
+            self.log_stack.setCurrentWidget(self.log_output if has_log else self.log_empty)
 
     def build_options(self) -> RemovalOptions:
         is_scan_mode = self.selected_mode == PROCESS_MODE_SCAN

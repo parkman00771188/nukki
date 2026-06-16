@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, QSize, Qt, QStandardPaths, QThread, Signal, Slot
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QIcon, QImageReader, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -35,6 +35,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from PIL import Image, UnidentifiedImageError
+
 from region_editor import RegionEditorDialog
 from remove_signature_background import (
     NamedRegion,
@@ -46,7 +48,30 @@ from remove_signature_background import (
 
 APP_NAME = "Nukki"
 WINDOW_TITLE = "Nukki"
-SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+SUPPORTED_EXTENSIONS = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".jpe",
+    ".jfif",
+    ".webp",
+    ".bmp",
+    ".dib",
+    ".gif",
+    ".tif",
+    ".tiff",
+    ".ico",
+    ".ppm",
+    ".pgm",
+    ".pbm",
+    ".pnm",
+    ".tga",
+    ".avif",
+}
+IMAGE_FILE_DIALOG_FILTER = (
+    "Image files (*.png *.jpg *.jpeg *.jpe *.jfif *.webp *.bmp *.dib *.gif "
+    "*.tif *.tiff *.ico *.ppm *.pgm *.pbm *.pnm *.tga *.avif);;All files (*)"
+)
 OUTPUT_HISTORY_LIMIT = 6
 DEFAULT_CROP_ENABLED = False
 DEFAULT_OPEN_FOLDER_ENABLED = True
@@ -57,7 +82,7 @@ SCAN_OUTPUT_SUFFIX = "_scan"
 
 APP_SUBTITLE = "\uc774\ubbf8\uc9c0 \ubc30\uacbd \uc81c\uac70 \ud504\ub85c\uadf8\ub7a8"
 UPLOAD_TITLE = "\uc774\ubbf8\uc9c0 \ucd94\uac00"
-UPLOAD_BUTTON = "+    \ud30c\uc77c \ucd94\uac00 \ub610\ub294 \ub4dc\ub798\uadf8\nJPG, PNG \ud30c\uc77c\uc744 \ucd94\uac00\ud558\uc138\uc694."
+UPLOAD_BUTTON = "+    \ud30c\uc77c \ucd94\uac00 \ub610\ub294 \ub4dc\ub798\uadf8\nJPG, PNG, WEBP \ub4f1 \uc774\ubbf8\uc9c0 \ud30c\uc77c\uc744 \ucd94\uac00\ud558\uc138\uc694."
 REMOVE_SELECTED = "\uc120\ud0dd \uc0ad\uc81c"
 CLEAR_ALL = "\uc804\uccb4 \uc0ad\uc81c"
 OUTPUT_TITLE = "\uc800\uc7a5 \uc124\uc815"
@@ -133,7 +158,18 @@ def save_settings(payload: dict) -> None:
 
 
 def is_supported_image(path: Path) -> bool:
-    return path.suffix.lower() in SUPPORTED_EXTENSIONS
+    if not path.exists() or not path.is_file():
+        return False
+
+    if QImageReader.imageFormat(str(path)):
+        return True
+
+    try:
+        with Image.open(path) as image:
+            image.verify()
+        return True
+    except (UnidentifiedImageError, OSError, ValueError):
+        return False
 
 
 def open_folder_in_explorer(path: Path) -> None:
@@ -342,14 +378,34 @@ def make_thumbnail(path: Path, size: int = 54) -> QPixmap:
 
 def supported_paths_from_urls(urls) -> list[str]:
     paths: list[str] = []
+    seen: set[Path] = set()
     for url in urls:
         local = url.toLocalFile()
         if not local:
             continue
         candidate = Path(local)
-        if candidate.is_file() and is_supported_image(candidate):
-            paths.append(str(candidate))
+        candidates: list[Path]
+        if candidate.is_dir():
+            candidates = [path for path in candidate.rglob("*") if path.is_file()]
+        else:
+            candidates = [candidate]
+
+        for image_path in candidates:
+            try:
+                resolved = image_path.resolve()
+            except OSError:
+                continue
+            if resolved in seen or not is_supported_image(resolved):
+                continue
+            seen.add(resolved)
+            paths.append(str(resolved))
     return paths
+
+
+def has_local_drop_urls(event) -> bool:
+    if not event.mimeData().hasUrls():
+        return False
+    return any(bool(url.toLocalFile()) for url in event.mimeData().urls())
 
 
 class QueueListWidget(QListWidget):
@@ -366,13 +422,13 @@ class QueueListWidget(QListWidget):
         self.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
 
     def dragEnterEvent(self, event) -> None:  # type: ignore[override]
-        if event.mimeData().hasUrls():
+        if has_local_drop_urls(event):
             event.acceptProposedAction()
             return
         event.ignore()
 
     def dragMoveEvent(self, event) -> None:  # type: ignore[override]
-        if event.mimeData().hasUrls():
+        if has_local_drop_urls(event):
             event.acceptProposedAction()
             return
         event.ignore()
@@ -394,13 +450,41 @@ class DropAreaButton(QPushButton):
         self.setAcceptDrops(True)
 
     def dragEnterEvent(self, event) -> None:  # type: ignore[override]
-        if event.mimeData().hasUrls() and supported_paths_from_urls(event.mimeData().urls()):
+        if has_local_drop_urls(event):
             event.acceptProposedAction()
             return
         event.ignore()
 
     def dragMoveEvent(self, event) -> None:  # type: ignore[override]
-        if event.mimeData().hasUrls() and supported_paths_from_urls(event.mimeData().urls()):
+        if has_local_drop_urls(event):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dropEvent(self, event) -> None:  # type: ignore[override]
+        paths = supported_paths_from_urls(event.mimeData().urls())
+        if paths:
+            self.files_dropped.emit(paths)
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+
+class ImageDropFrame(QFrame):
+    files_dropped = Signal(list)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event) -> None:  # type: ignore[override]
+        if has_local_drop_urls(event):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # type: ignore[override]
+        if has_local_drop_urls(event):
             event.acceptProposedAction()
             return
         event.ignore()
@@ -668,6 +752,7 @@ class NukkiWindow(QMainWindow):
         self.setWindowTitle(WINDOW_TITLE)
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAcceptDrops(True)
         self.setMinimumSize(1360, 780)
         self.resize(1480, 835)
         self.setWindowIcon(QIcon(create_logo_pixmap(64)))
@@ -693,6 +778,26 @@ class NukkiWindow(QMainWindow):
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
         self._drag_start_position = None
         super().mouseReleaseEvent(event)
+
+    def dragEnterEvent(self, event) -> None:  # type: ignore[override]
+        if has_local_drop_urls(event):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:  # type: ignore[override]
+        if has_local_drop_urls(event):
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event) -> None:  # type: ignore[override]
+        paths = supported_paths_from_urls(event.mimeData().urls())
+        if paths:
+            self.add_files(paths)
+            event.acceptProposedAction()
+            return
+        super().dropEvent(event)
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -847,8 +952,9 @@ class NukkiWindow(QMainWindow):
         return content
 
     def _build_upload_card(self) -> QFrame:
-        card = QFrame()
+        card = ImageDropFrame()
         card.setObjectName("card")
+        card.files_dropped.connect(self.add_files)
         layout = QVBoxLayout(card)
         layout.setContentsMargins(28, 20, 28, 20)
         layout.setSpacing(14)
@@ -997,8 +1103,9 @@ class NukkiWindow(QMainWindow):
         return card
 
     def _build_queue_card(self) -> QFrame:
-        card = QFrame()
+        card = ImageDropFrame()
         card.setObjectName("card")
+        card.files_dropped.connect(self.add_files)
         layout = QVBoxLayout(card)
         layout.setContentsMargins(22, 20, 22, 18)
         layout.setSpacing(14)
@@ -1521,7 +1628,7 @@ class NukkiWindow(QMainWindow):
             self,
             PICK_IMAGES_TITLE,
             start_dir,
-            "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp)",
+            IMAGE_FILE_DIALOG_FILTER,
         )
         if not files:
             return

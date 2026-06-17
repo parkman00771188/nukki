@@ -76,6 +76,7 @@ IMAGE_FILE_DIALOG_FILTER = (
 )
 OUTPUT_HISTORY_LIMIT = 6
 APP_VERSION = "v1.0.0"
+DEFAULT_OPTIONS_VERSION = 2
 RESOURCE_ALIASES = {
     "icon_folder_select_white.png": "nukki(1).png",
     "icon_image_add_white.png": "nukki(2).png",
@@ -91,7 +92,7 @@ RESOURCE_ALIASES = {
     "nukki_logo_white.png": "nukki(12).png",
     "icon_background_remove_white.png": "nukki(13).png",
 }
-DEFAULT_CROP_ENABLED = False
+DEFAULT_CROP_ENABLED = True
 DEFAULT_OPEN_FOLDER_ENABLED = True
 PROCESS_MODE_BACKGROUND = "background"
 PROCESS_MODE_SCAN = "scan"
@@ -1203,10 +1204,10 @@ class NukkiWindow(QMainWindow):
         card = QFrame()
         card.setObjectName("card")
         card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        card.setMinimumHeight(252)
+        card.setMinimumHeight(292)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(20, 18, 20, 18)
-        layout.setSpacing(8)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(10)
 
         title = build_title_row("icon_save_settings_white.png", OUTPUT_TITLE, icon_size=34)
 
@@ -1293,13 +1294,17 @@ class NukkiWindow(QMainWindow):
         layout.addWidget(title)
         layout.addWidget(path_label)
         layout.addLayout(path_row)
+        layout.addSpacing(2)
         layout.addWidget(save_name_label)
         layout.addLayout(save_name_row)
+        layout.addSpacing(2)
         layout.addWidget(format_label)
         layout.addLayout(format_row)
+        layout.addSpacing(2)
         layout.addWidget(self.crop_check)
         layout.addWidget(self.open_folder_check)
         layout.addWidget(self.path_hint)
+        layout.addStretch(1)
         return card
 
     def _build_progress_card(self) -> QFrame:
@@ -1373,6 +1378,7 @@ class NukkiWindow(QMainWindow):
     def _build_log_card(self) -> QFrame:
         card = QFrame()
         card.setObjectName("card")
+        card.setMaximumHeight(286)
         layout = QVBoxLayout(card)
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(10)
@@ -1803,11 +1809,31 @@ class NukkiWindow(QMainWindow):
         output_format = str(self.settings.get("output_format", "png")).strip().lower()
         self._set_format("jpeg" if output_format == "jpeg" else "png", save=False)
 
+        try:
+            defaults_version = int(self.settings.get("defaults_version", 0) or 0)
+        except (TypeError, ValueError):
+            defaults_version = 0
+        use_current_defaults = defaults_version < DEFAULT_OPTIONS_VERSION
+
         self.save_name_edit.clear()
-        self.crop_check.setChecked(bool(self.settings.get("crop", DEFAULT_CROP_ENABLED)))
-        self.open_folder_check.setChecked(bool(self.settings.get("open_folder", DEFAULT_OPEN_FOLDER_ENABLED)))
+        self.crop_check.blockSignals(True)
+        self.open_folder_check.blockSignals(True)
+        self.crop_check.setChecked(
+            DEFAULT_CROP_ENABLED
+            if use_current_defaults
+            else bool(self.settings.get("crop", DEFAULT_CROP_ENABLED))
+        )
+        self.open_folder_check.setChecked(
+            DEFAULT_OPEN_FOLDER_ENABLED
+            if use_current_defaults
+            else bool(self.settings.get("open_folder", DEFAULT_OPEN_FOLDER_ENABLED))
+        )
+        self.crop_check.blockSignals(False)
+        self.open_folder_check.blockSignals(False)
         self.path_hint.setText(CURRENT_OUTPUT.format(path=output_dir))
         self._set_mode(self.selected_mode, save=False)
+        if use_current_defaults:
+            self.save_ui_settings()
 
     def _populate_output_history(self, current_value: str) -> None:
         self.output_dir_combo.blockSignals(True)
@@ -1867,6 +1893,7 @@ class NukkiWindow(QMainWindow):
             "output_history": self.output_history,
             "output_format": self.current_output_format(),
             "mode": self.selected_mode,
+            "defaults_version": DEFAULT_OPTIONS_VERSION,
             "crop": self.crop_check.isChecked(),
             "open_folder": self.open_folder_check.isChecked(),
             "last_input_dir": self.last_input_dir,

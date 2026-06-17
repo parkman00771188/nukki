@@ -1504,14 +1504,17 @@ class NukkiWindow(QMainWindow):
         self.scan_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.scan_button.setCheckable(True)
         self.scan_button.setEnabled(SCAN_MODE_ENABLED)
+        self.scan_button.setVisible(SCAN_MODE_ENABLED)
         self.scan_button.setToolTip("\ud604\uc7ac \ube44\ud65c\uc131\ud654\ub41c \uba54\ub274\uc785\ub2c8\ub2e4.")
         self.scan_button.clicked.connect(lambda: self._set_mode(PROCESS_MODE_SCAN))
 
         self.mode_group.addButton(self.background_button)
-        self.mode_group.addButton(self.scan_button)
+        if SCAN_MODE_ENABLED:
+            self.mode_group.addButton(self.scan_button)
 
         layout.addWidget(self.background_button, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
-        layout.addWidget(self.scan_button, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        if SCAN_MODE_ENABLED:
+            layout.addWidget(self.scan_button, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         layout.addStretch(1)
 
         guide = QFrame()

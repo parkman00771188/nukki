@@ -113,6 +113,7 @@ RESOURCE_ALIASES = {
 }
 DEFAULT_CROP_ENABLED = True
 DEFAULT_OPEN_FOLDER_ENABLED = True
+SCAN_MODE_ENABLED = False
 RESIZE_HANDLE_WIDTH = 24
 RESIZE_GRIP_WIDTH = 16
 RESIZE_LEFT = 0x01
@@ -995,7 +996,11 @@ class NukkiWindow(QMainWindow):
         self.region_configs: dict[str, list[NamedRegion]] = {}
         self.output_name_map: dict[str, str] = {}
         saved_mode = str(self.settings.get("mode", PROCESS_MODE_BACKGROUND)).strip().lower()
-        self.selected_mode = PROCESS_MODE_SCAN if saved_mode == PROCESS_MODE_SCAN else PROCESS_MODE_BACKGROUND
+        self.selected_mode = (
+            PROCESS_MODE_SCAN
+            if SCAN_MODE_ENABLED and saved_mode == PROCESS_MODE_SCAN
+            else PROCESS_MODE_BACKGROUND
+        )
         self._drag_start_position: QPoint | None = None
         self._resize_edges = 0
         self._resize_start_geometry: QRect | None = None
@@ -1498,6 +1503,8 @@ class NukkiWindow(QMainWindow):
         self.scan_button.setIconSize(QSize(66, 66))
         self.scan_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.scan_button.setCheckable(True)
+        self.scan_button.setEnabled(SCAN_MODE_ENABLED)
+        self.scan_button.setToolTip("\ud604\uc7ac \ube44\ud65c\uc131\ud654\ub41c \uba54\ub274\uc785\ub2c8\ub2e4.")
         self.scan_button.clicked.connect(lambda: self._set_mode(PROCESS_MODE_SCAN))
 
         self.mode_group.addButton(self.background_button)
@@ -1945,6 +1952,11 @@ class NukkiWindow(QMainWindow):
                 background: #fff4e9;
                 color: #d74700;
             }
+            QToolButton#navButton:disabled {
+                background: #fbfaf8;
+                border-color: #eee8e2;
+                color: #9aa0a8;
+            }
             #guideCard {
                 background: #fff8ed;
                 border: 1px solid #ffd9b8;
@@ -2299,7 +2311,11 @@ class NukkiWindow(QMainWindow):
             self.save_ui_settings()
 
     def _set_mode(self, mode: str, save: bool = True) -> None:
-        self.selected_mode = PROCESS_MODE_SCAN if mode == PROCESS_MODE_SCAN else PROCESS_MODE_BACKGROUND
+        self.selected_mode = (
+            PROCESS_MODE_SCAN
+            if SCAN_MODE_ENABLED and mode == PROCESS_MODE_SCAN
+            else PROCESS_MODE_BACKGROUND
+        )
         if hasattr(self, "background_button"):
             self.background_button.blockSignals(True)
             self.scan_button.blockSignals(True)
@@ -2611,7 +2627,7 @@ class NukkiWindow(QMainWindow):
         self.png_radio.setDisabled(busy)
         self.jpeg_radio.setDisabled(busy)
         self.background_button.setDisabled(busy)
-        self.scan_button.setDisabled(busy)
+        self.scan_button.setDisabled(busy or not SCAN_MODE_ENABLED)
         for widget in self.queue_widgets:
             widget.check_box.setDisabled(busy)
             widget.edit_button.setDisabled(busy)

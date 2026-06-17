@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSlider,
     QSpinBox,
     QToolButton,
     QVBoxLayout,
@@ -829,19 +830,23 @@ class RegionDetailCanvas(QFrame):
         self.drag_handle = ""
         self.drag_point_index = -1
         self.last_image_point: tuple[int, int] | None = None
-        self.tool_mode = "select"
+        self.tool_mode = "pen"
         self.brush_size = 28
+        self.zoom_factor = 1.0
+        self.base_viewport_size = QSize(640, 520)
         self.hover_image_point: tuple[int, int] | None = None
         self.stroke_active = False
         self.stroke_last_image_point: tuple[int, int] | None = None
+        self.preview_mask: np.ndarray | None = None
         self.undo_stack: list[NamedRegion] = []
         self.redo_stack: list[NamedRegion] = []
 
         self.setObjectName("detailMaskCanvas")
         self.setMinimumSize(640, 520)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.MinimumExpanding)
         self.setMouseTracking(True)
         self._normalize_region()
+        self.update_canvas_size()
         self._emit_history_state()
 
     def set_region(self, region: NamedRegion, record: bool = False) -> None:
@@ -851,11 +856,12 @@ class RegionDetailCanvas(QFrame):
         self._normalize_region()
         self.auto_source_region = self.region.copy()
         self.auto_result_active = False
+        self.preview_mask = None
         self.update()
         self.region_changed.emit(self.region.copy())
 
     def set_tool_mode(self, mode: str) -> None:
-        self.tool_mode = mode if mode in {"select", "pen", "eraser"} else "select"
+        self.tool_mode = mode if mode in {"pen", "eraser"} else "pen"
         self.hover_image_point = None
         self.unsetCursor()
         self.update()
@@ -864,11 +870,35 @@ class RegionDetailCanvas(QFrame):
         self.brush_size = max(3, min(160, int(size)))
         self.update()
 
+    def set_base_viewport_size(self, size: QSize) -> None:
+        if size.width() <= 0 or size.height() <= 0:
+            return
+        if self.base_viewport_size == size:
+            return
+        self.base_viewport_size = QSize(size)
+        self.update_canvas_size()
+
+    def set_zoom_factor(self, value: float) -> None:
+        clamped = max(MIN_ZOOM_FACTOR, min(MAX_ZOOM_FACTOR, float(value)))
+        if abs(clamped - self.zoom_factor) < 0.0001:
+            return
+        self.zoom_factor = clamped
+        self.update_canvas_size()
+        self.update()
+
+    def update_canvas_size(self) -> None:
+        display_size = self._display_image_size()
+        width = max(self.base_viewport_size.width(), display_size.width() + CANVAS_MARGIN * 2)
+        height = max(self.base_viewport_size.height(), display_size.height() + CANVAS_MARGIN * 2)
+        self.setMinimumSize(width, height)
+        self.resize(width, height)
+
     def undo(self) -> None:
         if not self.undo_stack:
             return
         self.redo_stack.append(self.region.copy())
         self.region = self.undo_stack.pop()
+        self.preview_mask = None
         self.update()
         self.region_changed.emit(self.region.copy())
         self._emit_history_state()
@@ -878,6 +908,7 @@ class RegionDetailCanvas(QFrame):
             return
         self.undo_stack.append(self.region.copy())
         self.region = self.redo_stack.pop()
+        self.preview_mask = None
         self.update()
         self.region_changed.emit(self.region.copy())
         self._emit_history_state()
@@ -908,7 +939,7 @@ class RegionDetailCanvas(QFrame):
             painter.fillRect(image_rect.adjusted(-4, -4, 4, 4), QColor("#262230"))
             painter.drawPixmap(image_rect, self.pixmap)
 
-            if self.region.shape_key() == MASK_MODE:
+            if self.preview_mask is not None or self.region.shape_key() == MASK_MODE:
                 self._paint_mask_region(painter, image_rect)
                 self._paint_brush_preview(painter)
             else:
@@ -927,6 +958,34 @@ class RegionDetailCanvas(QFrame):
 
         painter.end()
         super().paintEvent(event)
+
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        delta = event.angleDelta().y()
+        if self.pixmap.isNull() or delta == 0:
+            super().wheelEvent(event)
+            return
+
+        old_image_rect = self._image_rect()
+        old_zoom = self.zoom_factor
+        global_point = event.globalPosition().toPoint()
+        local_point = event.position().toPoint()
+        anchor_ratio: tuple[float, float] | None = None
+
+        if old_image_rect.contains(local_point):
+            anchor_ratio = (
+                (local_point.x() - old_image_rect.x()) / max(1, old_image_rect.width()),
+                (local_point.y() - old_image_rect.y()) / max(1, old_image_rect.height()),
+            )
+
+        steps = max(1, abs(delta) // 120)
+        multiplier = ZOOM_STEP**steps
+        next_zoom = old_zoom * multiplier if delta > 0 else old_zoom / multiplier
+        self.set_zoom_factor(next_zoom)
+
+        if anchor_ratio is not None and abs(self.zoom_factor - old_zoom) > 0.0001:
+            self._reposition_scrollbars(global_point, anchor_ratio)
+
+        event.accept()
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if self.pixmap.isNull():
@@ -958,6 +1017,7 @@ class RegionDetailCanvas(QFrame):
             self._push_history()
             self.stroke_active = True
             self.stroke_last_image_point = image_point
+            self.preview_mask = region_to_mask(self.region, *self._image_size())
             self._apply_brush_stroke(image_point, image_point)
             event.accept()
             return
@@ -1024,6 +1084,7 @@ class RegionDetailCanvas(QFrame):
 
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
         if self.stroke_active:
+            self._commit_preview_mask()
             self.stroke_active = False
             self.stroke_last_image_point = None
             event.accept()
@@ -1079,17 +1140,52 @@ class RegionDetailCanvas(QFrame):
 
     def _apply_brush_stroke(self, start: tuple[int, int], end: tuple[int, int]) -> None:
         width, height = self._image_size()
-        mask = region_to_mask(self.region, width, height)
+        if self.preview_mask is None:
+            self.preview_mask = region_to_mask(self.region, width, height)
+            commit_immediately = not self.stroke_active
+        else:
+            commit_immediately = False
+
+        mask = self.preview_mask
         value = 255 if self.tool_mode == "pen" else 0
         thickness = max(3, int(self.brush_size))
         cv2.line(mask, start, end, value, thickness=thickness, lineType=cv2.LINE_AA)
         cv2.circle(mask, end, max(1, thickness // 2), value, thickness=-1, lineType=cv2.LINE_AA)
-        next_region = mask_to_region_mask(mask, self.region.name, self.region)
-        self.region = next_region
+        if commit_immediately:
+            self._commit_preview_mask()
+        else:
+            self.update()
+
+    def _commit_preview_mask(self) -> None:
+        if self.preview_mask is None:
+            return
+
+        self.region = mask_to_region_mask(self.preview_mask, self.region.name, self.region)
+        self.preview_mask = None
+        self._normalize_region()
         self._emit_region_changed()
 
     def _image_size(self) -> tuple[int, int]:
         return max(1, self.pixmap.width()), max(1, self.pixmap.height())
+
+    def _base_scale(self) -> float:
+        if self.pixmap.isNull():
+            return 1.0
+
+        available_width = max(120, self.base_viewport_size.width() - CANVAS_MARGIN * 2)
+        available_height = max(120, self.base_viewport_size.height() - CANVAS_MARGIN * 2)
+        width_scale = available_width / max(1, self.pixmap.width())
+        height_scale = available_height / max(1, self.pixmap.height())
+        return max(0.01, min(width_scale, height_scale))
+
+    def _display_image_size(self) -> QSize:
+        if self.pixmap.isNull():
+            return QSize(self.base_viewport_size)
+
+        scale = self._base_scale() * self.zoom_factor
+        width = max(1, int(round(self.pixmap.width() * scale)))
+        height = max(1, int(round(self.pixmap.height() * scale)))
+        return QSize(width, height)
 
     def _normalize_region(self) -> None:
         width, height = self._image_size()
@@ -1117,13 +1213,11 @@ class RegionDetailCanvas(QFrame):
         if self.pixmap.isNull():
             return QRect()
 
-        padding = 18
-        available_width = max(1, self.width() - padding * 2)
-        available_height = max(1, self.height() - padding * 2)
-        scale = min(available_width / max(1, self.pixmap.width()), available_height / max(1, self.pixmap.height()))
-        width = max(1, int(round(self.pixmap.width() * scale)))
-        height = max(1, int(round(self.pixmap.height() * scale)))
-        return QRect((self.width() - width) // 2, (self.height() - height) // 2, width, height)
+        display_size = self._display_image_size()
+        x = (self.width() - display_size.width()) // 2
+        extra_vertical = self.height() - display_size.height()
+        y = CANVAS_MARGIN if extra_vertical > CANVAS_MARGIN * 2 else extra_vertical // 2
+        return QRect(x, y, display_size.width(), display_size.height())
 
     def _view_point_to_image(self, point: QPoint, clamp: bool) -> tuple[int, int] | None:
         rect = self._image_rect()
@@ -1170,7 +1264,7 @@ class RegionDetailCanvas(QFrame):
 
     def _paint_mask_region(self, painter: QPainter, image_rect: QRect) -> None:
         width, height = self._image_size()
-        mask = region_to_mask(self.region, width, height)
+        mask = self.preview_mask if self.preview_mask is not None else region_to_mask(self.region, width, height)
         if int((mask > 0).sum()) == 0:
             return
 
@@ -1185,9 +1279,10 @@ class RegionDetailCanvas(QFrame):
         overlay[selected, 2] = 53
         overlay[selected, 3] = np.maximum(96, (mask[selected].astype(np.uint16) * 110 // 255).astype(np.uint8))
 
-        binary = selected.astype(np.uint8) * 255
-        edge = cv2.morphologyEx(binary, cv2.MORPH_GRADIENT, np.ones((3, 3), dtype=np.uint8))
-        overlay[edge > 0] = np.array([255, 235, 232, 235], dtype=np.uint8)
+        if not self.stroke_active:
+            binary = selected.astype(np.uint8) * 255
+            edge = cv2.morphologyEx(binary, cv2.MORPH_GRADIENT, np.ones((3, 3), dtype=np.uint8))
+            overlay[edge > 0] = np.array([255, 235, 232, 235], dtype=np.uint8)
 
         overlay = np.ascontiguousarray(overlay)
         image = QImage(overlay.data, width, height, width * 4, QImage.Format.Format_RGBA8888).copy()
@@ -1420,6 +1515,32 @@ class RegionDetailCanvas(QFrame):
         x, y = image_point
         return 0 <= x < width and 0 <= y < height and mask[y, x] > 0
 
+    def _find_scroll_area(self) -> QScrollArea | None:
+        parent = self.parentWidget()
+        while parent is not None:
+            if isinstance(parent, QScrollArea):
+                return parent
+            parent = parent.parentWidget()
+        return None
+
+    def _reposition_scrollbars(self, global_point: QPoint, anchor_ratio: tuple[float, float]) -> None:
+        scroll_area = self._find_scroll_area()
+        if scroll_area is None:
+            return
+
+        image_rect = self._image_rect()
+        if not image_rect.isValid():
+            return
+
+        viewport_point = scroll_area.viewport().mapFromGlobal(global_point)
+        target_x = int(image_rect.x() + anchor_ratio[0] * image_rect.width() - viewport_point.x())
+        target_y = int(image_rect.y() + anchor_ratio[1] * image_rect.height() - viewport_point.y())
+
+        horizontal = scroll_area.horizontalScrollBar()
+        vertical = scroll_area.verticalScrollBar()
+        horizontal.setValue(max(horizontal.minimum(), min(horizontal.maximum(), target_x)))
+        vertical.setValue(max(vertical.minimum(), min(vertical.maximum(), target_y)))
+
 
 class RegionDetailDialog(QDialog):
     def __init__(self, image_path: Path, region: NamedRegion, parent: QWidget | None = None) -> None:
@@ -1428,6 +1549,7 @@ class RegionDetailDialog(QDialog):
         self.original_region = region.copy()
         self.region = region.copy()
         self._updating_controls = False
+        self._updating_brush_controls = False
         self.pixmap = QPixmap(str(image_path))
 
         self.setWindowTitle(f"영역 세부 설정 - {region.name}")
@@ -1436,6 +1558,7 @@ class RegionDetailDialog(QDialog):
         self._build_ui()
         self._apply_styles()
         self._sync_controls_from_region()
+        QTimer.singleShot(0, self._update_canvas_viewport_reference)
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -1445,7 +1568,7 @@ class RegionDetailDialog(QDialog):
         title = QLabel("영역 세부 설정")
         title.setObjectName("dialogTitle")
 
-        help_text = QLabel("붉은 영역이 처리 후 남길 마스킹 영역입니다. 점/영역 드래그, 펜과 지우개, 오른쪽 좌표값, 자동 설정으로 마스크를 정밀하게 수정할 수 있습니다.")
+        help_text = QLabel("붉은 영역이 처리 후 남길 마스킹 영역입니다. 펜과 지우개, 브러시 크기, 오른쪽 좌표값으로 마스크를 정밀하게 수정할 수 있습니다.")
         help_text.setObjectName("helperText")
         help_text.setWordWrap(True)
 
@@ -1468,20 +1591,11 @@ class RegionDetailDialog(QDialog):
         self.redo_button.clicked.connect(self.mask_canvas.redo)
         self.redo_button.setEnabled(False)
 
-        self.detail_tool_group = QButtonGroup(self)
-        self.detail_tool_group.setExclusive(True)
-
-        self.select_tool = QToolButton()
-        self.select_tool.setObjectName("maskToolButton")
-        self.select_tool.setText("점")
-        self.select_tool.setCheckable(True)
-        self.select_tool.setChecked(True)
-        self.select_tool.clicked.connect(lambda: self._set_detail_tool("select"))
-
         self.pen_tool = QToolButton()
         self.pen_tool.setObjectName("maskToolButton")
         self.pen_tool.setText("펜")
         self.pen_tool.setCheckable(True)
+        self.pen_tool.setChecked(True)
         self.pen_tool.clicked.connect(lambda: self._set_detail_tool("pen"))
 
         self.eraser_tool = QToolButton()
@@ -1490,33 +1604,35 @@ class RegionDetailDialog(QDialog):
         self.eraser_tool.setCheckable(True)
         self.eraser_tool.clicked.connect(lambda: self._set_detail_tool("eraser"))
 
-        for button in (self.select_tool, self.pen_tool, self.eraser_tool):
+        self.detail_tool_group = QButtonGroup(self)
+        self.detail_tool_group.setExclusive(True)
+        for button in (self.pen_tool, self.eraser_tool):
             self.detail_tool_group.addButton(button)
 
         brush_label = QLabel("브러시")
         brush_label.setObjectName("fieldLabel")
+        self.brush_size_slider = QSlider(Qt.Orientation.Horizontal)
+        self.brush_size_slider.setObjectName("brushSizeSlider")
+        self.brush_size_slider.setRange(3, 160)
+        self.brush_size_slider.setValue(28)
+        self.brush_size_slider.valueChanged.connect(self._handle_brush_size_changed)
+
         self.brush_size_spin = QSpinBox()
         self.brush_size_spin.setObjectName("brushSizeSpin")
         self.brush_size_spin.setRange(3, 160)
         self.brush_size_spin.setValue(28)
-        self.brush_size_spin.setEnabled(False)
-        self.brush_size_spin.valueChanged.connect(self.mask_canvas.set_brush_size)
-
-        auto_button = QPushButton("영역 자동 설정")
-        auto_button.setObjectName("autoButton")
-        auto_button.clicked.connect(self._auto_detect_region)
+        self.brush_size_spin.valueChanged.connect(self._handle_brush_size_changed)
 
         toolbar_row.addWidget(self.undo_button)
         toolbar_row.addWidget(self.redo_button)
         toolbar_row.addSpacing(10)
-        toolbar_row.addWidget(self.select_tool)
         toolbar_row.addWidget(self.pen_tool)
         toolbar_row.addWidget(self.eraser_tool)
         toolbar_row.addSpacing(10)
         toolbar_row.addWidget(brush_label)
+        toolbar_row.addWidget(self.brush_size_slider)
         toolbar_row.addWidget(self.brush_size_spin)
         toolbar_row.addStretch(1)
-        toolbar_row.addWidget(auto_button)
 
         body = QHBoxLayout()
         body.setSpacing(16)
@@ -1567,7 +1683,14 @@ class RegionDetailDialog(QDialog):
         side_layout.addWidget(reset_button)
         side_layout.addStretch(1)
 
-        body.addWidget(self.mask_canvas, 1)
+        self.mask_scroll = QScrollArea()
+        self.mask_scroll.setObjectName("detailMaskScroll")
+        self.mask_scroll.setWidget(self.mask_canvas)
+        self.mask_scroll.setWidgetResizable(False)
+        self.mask_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.mask_scroll.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+
+        body.addWidget(self.mask_scroll, 1)
         body.addWidget(side_panel, 0)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -1579,6 +1702,10 @@ class RegionDetailDialog(QDialog):
         root.addLayout(toolbar_row)
         root.addLayout(body, 1)
         root.addWidget(buttons)
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._update_canvas_viewport_reference()
 
     def _apply_styles(self) -> None:
         self.setStyleSheet(
@@ -1612,6 +1739,14 @@ class RegionDetailDialog(QDialog):
                 border: 1px solid #393348;
                 border-radius: 18px;
             }
+            QScrollArea#detailMaskScroll {
+                background: #17151d;
+                border: 1px solid #393348;
+                border-radius: 18px;
+            }
+            QScrollArea#detailMaskScroll > QWidget > QWidget {
+                background: #17151d;
+            }
             QLineEdit, QSpinBox {
                 background: #201c29;
                 border: 1px solid #4a435a;
@@ -1642,15 +1777,33 @@ class RegionDetailDialog(QDialog):
                 max-width: 72px;
                 padding: 0 10px;
             }
-            QPushButton#autoButton {
-                min-width: 136px;
-            }
             QToolButton#maskToolButton {
                 min-width: 72px;
             }
             QToolButton#maskToolButton:checked {
                 background: #5f4a98;
                 border-color: #8e74da;
+            }
+            QSlider#brushSizeSlider {
+                min-width: 180px;
+                max-width: 220px;
+            }
+            QSlider#brushSizeSlider::groove:horizontal {
+                height: 6px;
+                background: #393348;
+                border-radius: 3px;
+            }
+            QSlider#brushSizeSlider::sub-page:horizontal {
+                background: #ff5a13;
+                border-radius: 3px;
+            }
+            QSlider#brushSizeSlider::handle:horizontal {
+                width: 16px;
+                height: 16px;
+                margin: -6px 0;
+                background: #ff7a1a;
+                border: 2px solid #ffe0d2;
+                border-radius: 8px;
             }
             QSpinBox#brushSizeSpin {
                 max-width: 78px;
@@ -1676,17 +1829,30 @@ class RegionDetailDialog(QDialog):
 
     def _set_detail_tool(self, mode: str) -> None:
         self.mask_canvas.set_tool_mode(mode)
-        self.select_tool.setChecked(mode == "select")
         self.pen_tool.setChecked(mode == "pen")
         self.eraser_tool.setChecked(mode == "eraser")
-        self.brush_size_spin.setEnabled(mode in {"pen", "eraser"})
 
     def _update_history_buttons(self, can_undo: bool, can_redo: bool) -> None:
         self.undo_button.setEnabled(can_undo)
         self.redo_button.setEnabled(can_redo)
 
-    def _auto_detect_region(self) -> None:
-        self.mask_canvas.auto_detect_region()
+    def _handle_brush_size_changed(self, value: int) -> None:
+        if self._updating_brush_controls:
+            return
+
+        self._updating_brush_controls = True
+        self.brush_size_slider.setValue(value)
+        self.brush_size_spin.setValue(value)
+        self._updating_brush_controls = False
+        self.mask_canvas.set_brush_size(value)
+
+    def _update_canvas_viewport_reference(self) -> None:
+        if not hasattr(self, "mask_scroll"):
+            return
+
+        viewport_size = self.mask_scroll.viewport().size()
+        if viewport_size.width() > 0 and viewport_size.height() > 0:
+            self.mask_canvas.set_base_viewport_size(viewport_size)
 
     def _sync_controls_from_region(self) -> None:
         width = max(1, self.pixmap.width())

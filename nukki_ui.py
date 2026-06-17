@@ -665,7 +665,7 @@ class ResizeHandle(QWidget):
 
 
 class CenteredMessageEmptyState(QWidget):
-    def __init__(self, image_name: str, message: str, image_size: int = 112) -> None:
+    def __init__(self, image_name: str | None, message: str, image_size: int = 112) -> None:
         super().__init__()
         self.setObjectName("emptyState")
         self._image_name = image_name
@@ -673,8 +673,12 @@ class CenteredMessageEmptyState(QWidget):
 
         self.image = QLabel(self)
         self.image.setObjectName("emptyStateImage")
-        self.image.setPixmap(asset_pixmap(image_name, image_size))
-        self.image.setFixedSize(image_size, image_size)
+        if image_name and image_size > 0:
+            self.image.setPixmap(asset_pixmap(image_name, image_size))
+            self.image.setFixedSize(image_size, image_size)
+        else:
+            self.image.hide()
+            self.image.setFixedSize(0, 0)
         self.image.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.label = QLabel(message, self)
@@ -691,6 +695,9 @@ class CenteredMessageEmptyState(QWidget):
         label_x = (self.width() - self.label.width()) // 2
         label_y = max(0, (self.height() - self.label.height()) // 2)
         self.label.move(label_x, label_y)
+
+        if self.image.isHidden():
+            return
 
         image_x = (self.width() - self.image.width()) // 2
         image_y = max(0, label_y - self.image.height() - 8)
@@ -1798,9 +1805,9 @@ class NukkiWindow(QMainWindow):
         clear_button.clicked.connect(self.log_output.clear)
 
         self.log_empty = CenteredMessageEmptyState(
-            "illust_log_empty_white.png",
+            None,
             "\uc2e4\ud589 \ub85c\uadf8\uac00 \uc5ec\uae30\uc5d0 \ud45c\uc2dc\ub429\ub2c8\ub2e4.",
-            image_size=98,
+            image_size=0,
         )
         self.log_stack = QStackedLayout()
         self.log_stack.setContentsMargins(0, 0, 0, 0)

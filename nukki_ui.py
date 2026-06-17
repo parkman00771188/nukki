@@ -76,6 +76,21 @@ IMAGE_FILE_DIALOG_FILTER = (
 )
 OUTPUT_HISTORY_LIMIT = 6
 APP_VERSION = "v1.0.0"
+RESOURCE_ALIASES = {
+    "icon_folder_select_white.png": "nukki(1).png",
+    "icon_image_add_white.png": "nukki(2).png",
+    "icon_save_settings_white.png": "nukki(3).png",
+    "icon_scan_image_white.png": "nukki(4).png",
+    "icon_start_play_white.png": "nukki(5).png",
+    "icon_trash_white.png": "nukki(6).png",
+    "illust_empty_image_list_white.png": "nukki(7).png",
+    "illust_log_empty_white.png": "nukki(8).png",
+    "illust_quick_guide_white.png": "nukki(9).png",
+    "illust_upload_dropzone_white.png": "nukki(10).png",
+    "nukki_icons_illustrations_white_sheet.png": "nukki(11).png",
+    "nukki_logo_white.png": "nukki(12).png",
+    "icon_background_remove_white.png": "nukki(13).png",
+}
 DEFAULT_CROP_ENABLED = False
 DEFAULT_OPEN_FOLDER_ENABLED = True
 PROCESS_MODE_BACKGROUND = "background"
@@ -154,7 +169,17 @@ def resource_base_dir() -> Path:
 
 
 def resource_path(name: str) -> Path:
-    return resource_base_dir() / name
+    base_dir = resource_base_dir()
+    path = base_dir / name
+    if path.exists():
+        return path
+
+    alias = RESOURCE_ALIASES.get(name)
+    if alias:
+        alias_path = base_dir / alias
+        if alias_path.exists():
+            return alias_path
+    return path
 
 
 def asset_pixmap(name: str, size: int | QSize, mode: Qt.AspectRatioMode = Qt.AspectRatioMode.KeepAspectRatio) -> QPixmap:
@@ -181,8 +206,13 @@ def cropped_asset_pixmap(path: Path) -> QPixmap:
     try:
         with Image.open(path) as image:
             rgba = image.convert("RGBA")
-            rgb = rgba.convert("RGB")
-            mask = rgb.point(lambda value: 255 if value < 248 else 0).convert("L")
+            alpha = rgba.getchannel("A")
+            alpha_min, alpha_max = alpha.getextrema()
+            if alpha_max > 0 and alpha_min < 250:
+                mask = alpha.point(lambda value: 255 if value > 10 else 0)
+            else:
+                rgb = rgba.convert("RGB")
+                mask = rgb.point(lambda value: 255 if value < 248 else 0).convert("L")
             bbox = mask.getbbox()
             if bbox is None:
                 return QPixmap(str(path))
@@ -705,7 +735,10 @@ class QueueItemWidget(QFrame):
         self.progress = QProgressBar()
         self.progress.setObjectName("itemProgress")
         self.progress.setTextVisible(False)
-        self.progress.setFixedSize(320, 10)
+        self.progress.setMinimumWidth(160)
+        self.progress.setMaximumWidth(320)
+        self.progress.setFixedHeight(10)
+        self.progress.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.progress.setRange(0, 100)
         self.progress.setValue(24)
         self.progress.setProperty("barState", "queued")
@@ -713,7 +746,7 @@ class QueueItemWidget(QFrame):
 
         self.delete_button = QToolButton()
         self.delete_button.setObjectName("deleteButton")
-        self.delete_button.setIcon(QIcon(create_control_pixmap("trash", 30)))
+        self.delete_button.setIcon(asset_icon("icon_trash_white.png"))
         self.delete_button.setIconSize(QSize(26, 26))
         self.delete_button.clicked.connect(self.remove_requested.emit)
         self.delete_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -896,7 +929,7 @@ class NukkiWindow(QMainWindow):
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAcceptDrops(True)
-        self.setMinimumSize(1360, 780)
+        self.setMinimumSize(1220, 720)
         self.resize(1480, 835)
         self.setWindowIcon(asset_icon("nukki_logo_white.png"))
 
@@ -976,15 +1009,15 @@ class NukkiWindow(QMainWindow):
     def _build_header(self) -> QFrame:
         header = QFrame()
         header.setObjectName("headerFrame")
-        header.setFixedHeight(118)
+        header.setFixedHeight(104)
 
         layout = QHBoxLayout(header)
-        layout.setContentsMargins(34, 18, 34, 18)
-        layout.setSpacing(18)
+        layout.setContentsMargins(30, 14, 30, 14)
+        layout.setSpacing(16)
 
         logo = QLabel()
-        logo.setPixmap(asset_pixmap("nukki_logo_white.png", 72))
-        logo.setFixedSize(72, 72)
+        logo.setPixmap(asset_pixmap("nukki_logo_white.png", 64))
+        logo.setFixedSize(64, 64)
 
         brand_column = QVBoxLayout()
         brand_column.setContentsMargins(0, 0, 0, 0)
@@ -1034,11 +1067,11 @@ class NukkiWindow(QMainWindow):
     def _build_sidebar(self) -> QFrame:
         sidebar = QFrame()
         sidebar.setObjectName("sidebarFrame")
-        sidebar.setFixedWidth(188)
+        sidebar.setFixedWidth(174)
 
         layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(18, 22, 18, 20)
-        layout.setSpacing(16)
+        layout.setContentsMargins(16, 18, 16, 16)
+        layout.setSpacing(14)
 
         self.mode_group = QButtonGroup(self)
         self.mode_group.setExclusive(True)
@@ -1047,7 +1080,7 @@ class NukkiWindow(QMainWindow):
         self.background_button.setObjectName("navButton")
         self.background_button.setText("\ubc30\uacbd\uc81c\uac70")
         self.background_button.setIcon(asset_icon("icon_background_remove_white.png"))
-        self.background_button.setIconSize(QSize(74, 74))
+        self.background_button.setIconSize(QSize(66, 66))
         self.background_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.background_button.setCheckable(True)
         self.background_button.clicked.connect(lambda: self._set_mode(PROCESS_MODE_BACKGROUND))
@@ -1056,7 +1089,7 @@ class NukkiWindow(QMainWindow):
         self.scan_button.setObjectName("navButton")
         self.scan_button.setText("\uc2a4\uce94 \uc774\ubbf8\uc9c0\n\ub9cc\ub4e4\uae30")
         self.scan_button.setIcon(asset_icon("icon_scan_image_white.png"))
-        self.scan_button.setIconSize(QSize(74, 74))
+        self.scan_button.setIconSize(QSize(66, 66))
         self.scan_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.scan_button.setCheckable(True)
         self.scan_button.clicked.connect(lambda: self._set_mode(PROCESS_MODE_SCAN))
@@ -1070,18 +1103,20 @@ class NukkiWindow(QMainWindow):
 
         guide = QFrame()
         guide.setObjectName("guideCard")
+        guide.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         guide_layout = QVBoxLayout(guide)
-        guide_layout.setContentsMargins(12, 12, 12, 14)
-        guide_layout.setSpacing(8)
+        guide_layout.setContentsMargins(10, 10, 10, 12)
+        guide_layout.setSpacing(7)
 
         guide_image = QLabel()
-        guide_image.setPixmap(asset_pixmap("illust_quick_guide_white.png", 92))
-        guide_image.setFixedSize(92, 72)
+        guide_image.setPixmap(asset_pixmap("illust_quick_guide_white.png", 82))
+        guide_image.setFixedSize(82, 58)
         guide_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         guide_text = QLabel("\ub354 \ube60\ub974\uace0 \uac04\ud3b8\ud558\uac8c\n\uc774\ubbf8\uc9c0\ub97c \ucc98\ub9ac\ud558\uc138\uc694!")
         guide_text.setObjectName("guideText")
         guide_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        guide_text.setWordWrap(True)
 
         guide_button = QPushButton("\uc0ac\uc6a9 \uac00\uc774\ub4dc  >")
         guide_button.setObjectName("guideButton")
@@ -1101,28 +1136,28 @@ class NukkiWindow(QMainWindow):
         content = QWidget()
         content.setObjectName("contentFrame")
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(24, 22, 24, 24)
-        layout.setSpacing(20)
+        layout.setContentsMargins(20, 18, 20, 20)
+        layout.setSpacing(16)
 
         grid = QHBoxLayout()
-        grid.setSpacing(18)
+        grid.setSpacing(16)
 
         left_column = QVBoxLayout()
-        left_column.setSpacing(14)
+        left_column.setSpacing(12)
         left_column.addWidget(self._build_upload_card())
         left_column.addWidget(self._build_queue_card(), 1)
 
         right_column = QVBoxLayout()
-        right_column.setSpacing(14)
+        right_column.setSpacing(12)
         right_column.addWidget(self._build_output_card())
         right_column.addWidget(self._build_log_card(), 1)
 
-        grid.addLayout(left_column, 2)
-        grid.addLayout(right_column, 1)
+        grid.addLayout(left_column, 3)
+        grid.addLayout(right_column, 2)
         layout.addLayout(grid, 1)
 
         bottom_row = QHBoxLayout()
-        bottom_row.setSpacing(16)
+        bottom_row.setSpacing(14)
         bottom_row.addWidget(self._build_progress_card(), 1)
 
         self.start_button = QPushButton(START_BUTTON)
@@ -1138,17 +1173,20 @@ class NukkiWindow(QMainWindow):
     def _build_upload_card(self) -> QFrame:
         card = ImageDropFrame()
         card.setObjectName("card")
+        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        card.setMinimumHeight(252)
         card.files_dropped.connect(self.add_files)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(28, 20, 28, 20)
-        layout.setSpacing(14)
+        layout.setContentsMargins(24, 18, 24, 18)
+        layout.setSpacing(12)
 
         title = build_title_row("icon_image_add_white.png", UPLOAD_TITLE, icon_size=34)
 
         self.add_button = DropAreaButton(UPLOAD_BUTTON)
         self.add_button.setObjectName("uploadButton")
         self.add_button.setIcon(asset_icon("illust_upload_dropzone_white.png"))
-        self.add_button.setIconSize(QSize(146, 96))
+        self.add_button.setIconSize(QSize(132, 86))
+        self.add_button.setMinimumHeight(164)
         self.add_button.clicked.connect(self.select_files)
         self.add_button.files_dropped.connect(self.add_files)
         card.set_drag_highlight_target(self.add_button)
@@ -1160,6 +1198,8 @@ class NukkiWindow(QMainWindow):
 
         self.clear_button = QPushButton(CLEAR_ALL)
         self.clear_button.setObjectName("subButton")
+        self.clear_button.setIcon(asset_icon("icon_trash_white.png"))
+        self.clear_button.setIconSize(QSize(18, 18))
         self.clear_button.clicked.connect(self.clear_files)
 
         layout.addWidget(title)
@@ -1169,9 +1209,11 @@ class NukkiWindow(QMainWindow):
     def _build_output_card(self) -> QFrame:
         card = QFrame()
         card.setObjectName("card")
+        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        card.setMinimumHeight(252)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(22, 22, 22, 22)
-        layout.setSpacing(18)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(8)
 
         title = build_title_row("icon_save_settings_white.png", OUTPUT_TITLE, icon_size=34)
 
@@ -1185,13 +1227,20 @@ class NukkiWindow(QMainWindow):
         self.output_dir_combo.setObjectName("pathCombo")
         self.output_dir_combo.setEditable(True)
         self.output_dir_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.output_dir_combo.setMinimumContentsLength(8)
+        self.output_dir_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.output_dir_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.output_dir_combo.setMinimumWidth(0)
         self.output_dir_combo.lineEdit().setPlaceholderText("\ucd9c\ub825 \ud3f4\ub354\ub97c \uc120\ud0dd\ud558\uc138\uc694.")
+        self.output_dir_combo.lineEdit().setMinimumWidth(0)
         self.output_dir_combo.lineEdit().editingFinished.connect(self.on_output_dir_changed)
         self.output_dir_combo.activated.connect(lambda _index: self.on_output_dir_changed())
 
         browse = QPushButton(OUTPUT_BROWSE)
         browse.setObjectName("browseButton")
+        browse.setIcon(asset_icon("icon_folder_select_white.png"))
+        browse.setIconSize(QSize(20, 20))
+        browse.setFixedWidth(112)
         browse.clicked.connect(self.choose_output_dir)
 
         path_row.addWidget(self.output_dir_combo, 1)
@@ -1205,11 +1254,13 @@ class NukkiWindow(QMainWindow):
 
         self.save_name_edit = QLineEdit()
         self.save_name_edit.setObjectName("saveNameEdit")
+        self.save_name_edit.setMinimumWidth(0)
         self.save_name_edit.setPlaceholderText(SAVE_NAME_PLACEHOLDER)
         self.save_name_edit.editingFinished.connect(self.save_ui_settings)
 
         self.apply_name_button = QPushButton(SAVE_NAME_BUTTON)
         self.apply_name_button.setObjectName("browseButton")
+        self.apply_name_button.setFixedWidth(72)
         self.apply_name_button.clicked.connect(lambda: self.apply_save_name())
 
         save_name_row.addWidget(self.save_name_edit, 1)
@@ -1219,7 +1270,7 @@ class NukkiWindow(QMainWindow):
         format_label.setObjectName("fieldLabel")
 
         format_row = QHBoxLayout()
-        format_row.setSpacing(24)
+        format_row.setSpacing(18)
 
         self.format_group = QButtonGroup(self)
         self.png_radio = QRadioButton(PNG_LABEL)
@@ -1249,13 +1300,10 @@ class NukkiWindow(QMainWindow):
         layout.addWidget(title)
         layout.addWidget(path_label)
         layout.addLayout(path_row)
-        layout.addSpacing(4)
         layout.addWidget(save_name_label)
         layout.addLayout(save_name_row)
-        layout.addSpacing(4)
         layout.addWidget(format_label)
         layout.addLayout(format_row)
-        layout.addSpacing(2)
         layout.addWidget(self.crop_check)
         layout.addWidget(self.open_folder_check)
         layout.addWidget(self.path_hint)
@@ -1264,9 +1312,10 @@ class NukkiWindow(QMainWindow):
     def _build_progress_card(self) -> QFrame:
         card = QFrame()
         card.setObjectName("progressCard")
+        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         layout = QHBoxLayout(card)
-        layout.setContentsMargins(18, 16, 18, 16)
-        layout.setSpacing(26)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(20)
 
         title = QLabel(ACTION_TITLE)
         title.setObjectName("progressTitle")
@@ -1292,8 +1341,8 @@ class NukkiWindow(QMainWindow):
         card.setObjectName("card")
         card.files_dropped.connect(self.add_files)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(22, 20, 22, 18)
-        layout.setSpacing(14)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(12)
 
         header_row = QHBoxLayout()
         header_row.setSpacing(12)
@@ -1316,7 +1365,7 @@ class NukkiWindow(QMainWindow):
         self.queue_empty = build_empty_state(
             "illust_empty_image_list_white.png",
             "\ucd94\uac00\ub41c \uc774\ubbf8\uc9c0\uac00 \uc5ec\uae30\uc5d0 \ud45c\uc2dc\ub429\ub2c8\ub2e4.",
-            image_size=150,
+            image_size=132,
         )
 
         self.queue_stack = QStackedLayout()
@@ -1332,7 +1381,7 @@ class NukkiWindow(QMainWindow):
         card = QFrame()
         card.setObjectName("card")
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(10)
 
         header_row = QHBoxLayout()
@@ -1342,6 +1391,8 @@ class NukkiWindow(QMainWindow):
 
         clear_button = QPushButton(CLEAR_LOG)
         clear_button.setObjectName("subButton")
+        clear_button.setIcon(asset_icon("icon_trash_white.png"))
+        clear_button.setIconSize(QSize(18, 18))
 
         self.log_output = QPlainTextEdit()
         self.log_output.setObjectName("logOutput")
@@ -1355,7 +1406,7 @@ class NukkiWindow(QMainWindow):
         self.log_empty = build_empty_state(
             "illust_log_empty_white.png",
             "\uc2e4\ud589 \ub85c\uadf8\uac00 \uc5ec\uae30\uc5d0 \ud45c\uc2dc\ub429\ub2c8\ub2e4.",
-            image_size=130,
+            image_size=116,
         )
         self.log_stack = QStackedLayout()
         self.log_stack.setContentsMargins(0, 0, 0, 0)
@@ -1402,11 +1453,11 @@ class NukkiWindow(QMainWindow):
             }
             #brandLabel {
                 color: #050505;
-                font: 800 30px "Malgun Gothic";
+                font: 800 28px "Malgun Gothic";
             }
             #subtitleLabel {
                 color: #4d5159;
-                font: 500 15px "Malgun Gothic";
+                font: 500 14px "Malgun Gothic";
             }
             #pageTitle {
                 color: #151515;
@@ -1419,7 +1470,7 @@ class NukkiWindow(QMainWindow):
             }
             #cardTitle {
                 color: #111111;
-                font: 800 18px "Malgun Gothic";
+                font: 800 17px "Malgun Gothic";
             }
             #titleRow {
                 background: transparent;
@@ -1429,7 +1480,7 @@ class NukkiWindow(QMainWindow):
             }
             #fieldLabel {
                 color: #171717;
-                font: 700 14px "Malgun Gothic";
+                font: 700 13px "Malgun Gothic";
             }
             #statusLabel, #hintLabel, #metaLabel {
                 color: #6a6d73;
@@ -1437,7 +1488,7 @@ class NukkiWindow(QMainWindow):
             }
             #countChip, #logChip {
                 color: #5d6067;
-                font: 600 15px "Malgun Gothic";
+                font: 600 14px "Malgun Gothic";
                 padding: 0;
             }
             QToolButton#windowButton {
@@ -1459,10 +1510,10 @@ class NukkiWindow(QMainWindow):
                 border: 1px solid #ece6df;
                 border-radius: 12px;
                 color: #151515;
-                font: 900 18px "Malgun Gothic";
-                min-width: 142px;
-                max-width: 142px;
-                min-height: 164px;
+                font: 900 17px "Malgun Gothic";
+                min-width: 140px;
+                max-width: 140px;
+                min-height: 148px;
                 padding: 12px 6px;
             }
             QToolButton#navButton:hover {
@@ -1481,15 +1532,15 @@ class NukkiWindow(QMainWindow):
             }
             #guideText {
                 color: #4f5965;
-                font: 700 12px "Malgun Gothic";
+                font: 700 11px "Malgun Gothic";
             }
             #guideButton {
                 background: #ffffff;
                 border: 1px solid #ffb987;
                 border-radius: 7px;
                 color: #ff5a00;
-                font: 800 12px "Malgun Gothic";
-                min-height: 28px;
+                font: 800 11px "Malgun Gothic";
+                min-height: 26px;
             }
             #guideButton:hover {
                 background: #fff1e7;
@@ -1503,8 +1554,8 @@ class NukkiWindow(QMainWindow):
                 border: 1.6px dashed #ff8d45;
                 border-radius: 12px;
                 color: #575b63;
-                font: 600 18px "Malgun Gothic";
-                min-height: 190px;
+                font: 700 17px "Malgun Gothic";
+                min-height: 164px;
                 padding: 12px 18px;
                 text-align: center;
             }
@@ -1516,16 +1567,16 @@ class NukkiWindow(QMainWindow):
                 background: #fff1e6;
                 border: 2px dashed #ff5a00;
                 color: #ff5a00;
-                font: 800 18px "Malgun Gothic";
+                font: 800 17px "Malgun Gothic";
             }
             #subButton, #browseButton {
                 background: #ffffff;
                 border: 1px solid #e0dcd7;
                 border-radius: 8px;
                 color: #151515;
-                font: 700 14px "Malgun Gothic";
-                min-height: 38px;
-                padding: 0 14px;
+                font: 700 13px "Malgun Gothic";
+                min-height: 36px;
+                padding: 0 10px;
             }
             #subButton:hover, #browseButton:hover {
                 background: #fff7f0;
@@ -1536,9 +1587,9 @@ class NukkiWindow(QMainWindow):
                 border: 1px solid #e0dcd7;
                 border-radius: 8px;
                 padding: 0 12px;
-                min-height: 42px;
+                min-height: 38px;
                 color: #1b1b1b;
-                font: 600 13px "Malgun Gothic";
+                font: 600 12px "Malgun Gothic";
             }
             QComboBox#pathCombo::drop-down {
                 width: 28px;
@@ -1558,18 +1609,18 @@ class NukkiWindow(QMainWindow):
                 border: 1px solid #e0dcd7;
                 border-radius: 8px;
                 padding: 0 12px;
-                min-height: 42px;
+                min-height: 38px;
                 color: #1b1b1b;
-                font: 600 13px "Malgun Gothic";
+                font: 600 12px "Malgun Gothic";
             }
             QCheckBox, QRadioButton {
                 color: #1d1d1f;
-                font: 700 15px "Malgun Gothic";
+                font: 700 14px "Malgun Gothic";
                 spacing: 8px;
             }
             QCheckBox::indicator, QRadioButton::indicator {
-                width: 18px;
-                height: 18px;
+                width: 17px;
+                height: 17px;
                 border: 1px solid #d0d0d0;
                 background: #ffffff;
             }
@@ -1588,7 +1639,7 @@ class NukkiWindow(QMainWindow):
                 border-color: #ff5a00;
             }
             QRadioButton#radioLike {
-                font: 800 16px "Malgun Gothic";
+                font: 800 15px "Malgun Gothic";
             }
             QRadioButton#radioLike:checked {
                 color: #ff5a00;
@@ -1598,10 +1649,10 @@ class NukkiWindow(QMainWindow):
                 border: 1px solid #ff5a00;
                 border-radius: 14px;
                 color: #ffffff;
-                font: 900 24px "Malgun Gothic";
-                min-width: 300px;
-                min-height: 78px;
-                padding: 0 30px;
+                font: 900 23px "Malgun Gothic";
+                min-width: 280px;
+                min-height: 72px;
+                padding: 0 28px;
             }
             #startButton:hover {
                 background: #ff6b16;
@@ -1618,11 +1669,11 @@ class NukkiWindow(QMainWindow):
             }
             #progressTitle {
                 color: #111111;
-                font: 800 17px "Malgun Gothic";
+                font: 800 16px "Malgun Gothic";
             }
             #progressPercent {
                 color: #171717;
-                font: 500 22px "Malgun Gothic";
+                font: 500 21px "Malgun Gothic";
             }
             QProgressBar#mainProgress {
                 background: #f0ebe7;

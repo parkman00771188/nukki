@@ -1049,76 +1049,23 @@ class NukkiWindow(QMainWindow):
         self.content_frame: QWidget | None = None
 
         self.setWindowTitle(WINDOW_TITLE)
-        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self.setAcceptDrops(True)
-        self.setMouseTracking(True)
+        self.setMouseTracking(False)
         self.setMinimumSize(1220, 720)
         self.resize(1480, 835)
         self.setWindowIcon(asset_icon("nukki_logo_white.png"))
 
         self._build_ui()
-        self._build_resize_handles()
         self._load_settings_into_ui()
         self._apply_styles()
         self._apply_window_chrome_state()
-        app = QApplication.instance()
-        if app is not None:
-            app.installEventFilter(self)
 
     def nativeEvent(self, event_type, message):  # type: ignore[override]
-        if sys.platform.startswith("win"):
-            try:
-                native_message = NativeMessage.from_address(int(message))
-            except (TypeError, ValueError):
-                native_message = None
-
-            if native_message is not None and native_message.message == WM_NCHITTEST:
-                hit_result = self._resize_hit_test(QCursor.pos())
-                if hit_result is not None:
-                    return True, hit_result
-
         return super().nativeEvent(event_type, message)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]
-        if isinstance(watched, QWidget) and (watched is self or self.isAncestorOf(watched)):
-            event_type = event.type()
-
-            if event_type == QEvent.Type.MouseButtonPress and getattr(event, "button", lambda: None)() == Qt.MouseButton.LeftButton:
-                global_pos = event.globalPosition().toPoint()
-                edges = self._resize_edges_at_global(global_pos)
-                if edges:
-                    self._begin_manual_resize(edges, global_pos)
-                    event.accept()
-                    return True
-
-            if event_type == QEvent.Type.MouseButtonDblClick and getattr(event, "button", lambda: None)() == Qt.MouseButton.LeftButton:
-                if self._should_toggle_maximize_from(watched, event.globalPosition().toPoint()):
-                    self.toggle_maximized()
-                    event.accept()
-                    return True
-
-            if event_type == QEvent.Type.MouseMove and hasattr(event, "globalPosition"):
-                global_pos = event.globalPosition().toPoint()
-                if self._resize_edges and self._resize_start_geometry is not None and self._resize_start_global is not None:
-                    self._perform_manual_resize(global_pos)
-                    event.accept()
-                    return True
-                if not getattr(event, "buttons", lambda: Qt.MouseButton.NoButton)() & Qt.MouseButton.LeftButton:
-                    self._update_resize_cursor(global_pos)
-
-            if event_type == QEvent.Type.MouseButtonRelease:
-                if self._resize_edges:
-                    self._finish_manual_resize()
-                    event.accept()
-                    return True
-                if hasattr(event, "globalPosition"):
-                    self._update_resize_cursor(event.globalPosition().toPoint())
-
-            if event_type in (QEvent.Type.Leave, QEvent.Type.WindowDeactivate):
-                if not self._resize_edges:
-                    self._clear_resize_cursor()
-
         return super().eventFilter(watched, event)
 
     def changeEvent(self, event) -> None:  # type: ignore[override]
@@ -1132,14 +1079,11 @@ class NukkiWindow(QMainWindow):
         self._position_resize_handles()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
-        app = QApplication.instance()
-        if app is not None:
-            app.removeEventFilter(self)
         self._clear_resize_cursor(force=True)
         super().closeEvent(event)
 
     def _is_window_maximized(self) -> bool:
-        return self._custom_maximized or self.isMaximized()
+        return self.isMaximized()
 
     def _available_screen_geometry(self) -> QRect:
         center = self.frameGeometry().center()
@@ -1149,20 +1093,19 @@ class NukkiWindow(QMainWindow):
         return screen.availableGeometry()
 
     def _apply_window_chrome_state(self) -> None:
-        maximized = self._is_window_maximized()
         if self.root_layout is not None:
-            margin = 0 if maximized else 18
-            self.root_layout.setContentsMargins(margin, margin, margin, margin)
+            self.root_layout.setContentsMargins(0, 0, 0, 0)
 
         for widget in (self.outer_frame, self.header_frame, self.sidebar_frame, self.content_frame):
             if widget is None:
                 continue
-            widget.setProperty("maximized", "true" if maximized else "false")
+            widget.setProperty("maximized", "false")
             widget.style().unpolish(widget)
             widget.style().polish(widget)
             widget.update()
 
-        self._position_resize_handles()
+        for handle in self._resize_handles:
+            handle.hide()
 
     def _resize_hit_test(self, global_pos: QPoint) -> int | None:
         if self._is_window_maximized() or self.isFullScreen():
@@ -1396,65 +1339,23 @@ class NukkiWindow(QMainWindow):
         return 0 <= local_pos.x() <= self.width() and 0 <= local_pos.y() <= 136
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
-        if self._resize_edges:
-            event.accept()
-            return
-        if event.button() == Qt.MouseButton.LeftButton:
-            edges = self._resize_edges_at_global(event.globalPosition().toPoint())
-            if edges:
-                self._begin_manual_resize(edges, event.globalPosition().toPoint())
-                event.accept()
-                return
-        if event.button() == Qt.MouseButton.LeftButton and event.position().y() <= 136:
-            if self._is_window_maximized():
-                event.accept()
-                return
-            self._drag_start_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            event.accept()
-            return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
-        if self._resize_edges:
-            self._perform_manual_resize(event.globalPosition().toPoint())
-            event.accept()
-            return
-        if self._drag_start_position is not None and event.buttons() & Qt.MouseButton.LeftButton:
-            self.move(event.globalPosition().toPoint() - self._drag_start_position)
-            event.accept()
-            return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
         self._drag_start_position = None
-        if self._resize_edges:
-            self._finish_manual_resize()
-            event.accept()
-            return
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
-        if event.button() == Qt.MouseButton.LeftButton and self._should_toggle_maximize_from(self, event.globalPosition().toPoint()):
-            self.toggle_maximized()
-            event.accept()
-            return
         super().mouseDoubleClickEvent(event)
 
     def toggle_maximized(self) -> None:
-        if self._is_window_maximized():
-            target_geometry = self._normal_geometry
-            self._custom_maximized = False
+        if self.isMaximized():
             self.showNormal()
-            if target_geometry is not None:
-                self.setGeometry(target_geometry)
-            self._normal_geometry = None
         else:
-            self._normal_geometry = self.geometry()
-            self._custom_maximized = True
-            self.showNormal()
-            self.setGeometry(self._available_screen_geometry())
-            self.raise_()
-            self.activateWindow()
+            self.showMaximized()
         self._refresh_maximize_button_icon()
         self._apply_window_chrome_state()
 
@@ -1488,7 +1389,7 @@ class NukkiWindow(QMainWindow):
         root.setObjectName("rootWidget")
         root_layout = QVBoxLayout(root)
         self.root_layout = root_layout
-        root_layout.setContentsMargins(18, 18, 18, 18)
+        root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
         outer = QFrame()
@@ -1535,30 +1436,9 @@ class NukkiWindow(QMainWindow):
         brand_column.addWidget(brand)
         brand_column.addWidget(subtitle)
 
-        minimize_button = QToolButton()
-        minimize_button.setObjectName("windowButton")
-        minimize_button.setIcon(QIcon(create_control_pixmap("minimize", 34)))
-        minimize_button.setIconSize(QSize(30, 30))
-        minimize_button.clicked.connect(self.showMinimized)
-
-        self.maximize_button = QToolButton()
-        self.maximize_button.setObjectName("windowButton")
-        self.maximize_button.setIcon(QIcon(create_control_pixmap("maximize", 34)))
-        self.maximize_button.setIconSize(QSize(30, 30))
-        self.maximize_button.clicked.connect(self.toggle_maximized)
-
-        close_button = QToolButton()
-        close_button.setObjectName("windowButton")
-        close_button.setIcon(QIcon(create_control_pixmap("close", 34)))
-        close_button.setIconSize(QSize(30, 30))
-        close_button.clicked.connect(self.close)
-
         layout.addWidget(logo, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addLayout(brand_column)
         layout.addStretch(1)
-        layout.addWidget(minimize_button, 0, Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(self.maximize_button, 0, Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(close_button, 0, Qt.AlignmentFlag.AlignVCenter)
         return header
 
     def _build_sidebar(self) -> QFrame:
@@ -1939,7 +1819,7 @@ class NukkiWindow(QMainWindow):
         self.setStyleSheet(
             """
             QMainWindow, #rootWidget {
-                background: transparent;
+                background: #fffaf6;
                 font-family: "Malgun Gothic";
             }
             #resizeHandle {
@@ -1951,8 +1831,8 @@ class NukkiWindow(QMainWindow):
             }
             #outerFrame {
                 background: #fffaf6;
-                border: 1px solid #c9cfd8;
-                border-radius: 10px;
+                border: none;
+                border-radius: 0;
             }
             #outerFrame[maximized="true"] {
                 border-radius: 0;
@@ -1960,8 +1840,8 @@ class NukkiWindow(QMainWindow):
             }
             #headerFrame {
                 background: #ffffff;
-                border-top-left-radius: 10px;
-                border-top-right-radius: 10px;
+                border-top-left-radius: 0;
+                border-top-right-radius: 0;
                 border-bottom: 1px solid #e7e2dd;
             }
             #headerFrame[maximized="true"] {
@@ -1971,14 +1851,14 @@ class NukkiWindow(QMainWindow):
             #sidebarFrame {
                 background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1, stop: 0 #fff9f1, stop: 0.55 #fffdfb, stop: 1 #fff8ed);
                 border-right: 1px solid #ebe5df;
-                border-bottom-left-radius: 10px;
+                border-bottom-left-radius: 0;
             }
             #sidebarFrame[maximized="true"] {
                 border-bottom-left-radius: 0;
             }
             #contentFrame {
                 background: #fffaf6;
-                border-bottom-right-radius: 10px;
+                border-bottom-right-radius: 0;
             }
             #contentFrame[maximized="true"] {
                 border-bottom-right-radius: 0;

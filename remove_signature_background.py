@@ -584,23 +584,31 @@ def process_image_regions(
 
     with Image.open(source_path) as image:
         rgb_image = image.convert("RGB")
+        rgba_image = image.convert("RGBA")
         width, height = rgb_image.size
 
         for index, region in enumerate(regions, start=1):
             left, top, right, bottom = region.normalized_box(width, height)
-            region_image = rgb_image.crop((left, top, right, bottom))
-            result, method = remove_background_from_image(region_image, options=region_options)
-
             region_shape = region.shape_key()
+
+            if region_shape == "mask":
+                mask_image = region.mask_image(width, height)
+                if mask_image is not None:
+                    region_image = rgba_image.crop((left, top, right, bottom))
+                    local_mask = mask_image.crop((left, top, right, bottom))
+                    result = apply_alpha_mask(region_image, local_mask)
+                    method = "mask"
+                else:
+                    region_image = rgb_image.crop((left, top, right, bottom))
+                    result, method = remove_background_from_image(region_image, options=region_options)
+            else:
+                region_image = rgb_image.crop((left, top, right, bottom))
+                result, method = remove_background_from_image(region_image, options=region_options)
+
             if region_shape == "polygon":
                 polygon_points = region.normalized_points(width, height)
                 local_points = [(x - left, y - top) for x, y in polygon_points]
                 result = apply_polygon_mask(result, local_points)
-            elif region_shape == "mask":
-                mask_image = region.mask_image(width, height)
-                if mask_image is not None:
-                    local_mask = mask_image.crop((left, top, right, bottom))
-                    result = apply_alpha_mask(result, local_mask)
 
             if options.crop:
                 result = crop_to_visible_area(result, padding=options.padding)

@@ -775,7 +775,7 @@ class QueueItemWidget(QFrame):
         self.progress.setFixedHeight(10)
         self.progress.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.progress.setRange(0, 100)
-        self.progress.setValue(24)
+        self.progress.setValue(0)
         self.progress.setProperty("barState", "queued")
         text_column.addWidget(self.progress, 0, Qt.AlignmentFlag.AlignLeft)
 
@@ -815,7 +815,7 @@ class QueueItemWidget(QFrame):
         else:
             self.detail_label.setText(self._queued_detail_text())
             self.progress.setRange(0, 100)
-            self.progress.setValue(24)
+            self.progress.setValue(0)
             self.progress.setProperty("barState", "queued")
 
         self.progress.style().unpolish(self.progress)
@@ -2039,7 +2039,7 @@ class NukkiWindow(QMainWindow):
                 border-radius: 5px;
             }
             QProgressBar#itemProgress[barState="done"]::chunk {
-                background: #4fae58;
+                background: #ff5a00;
             }
             QProgressBar#itemProgress[barState="failed"]::chunk {
                 background: #d77878;

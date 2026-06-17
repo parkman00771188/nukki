@@ -1030,12 +1030,6 @@ class NukkiWindow(QMainWindow):
         brand_column.addWidget(brand)
         brand_column.addWidget(subtitle)
 
-        self.settings_button = QToolButton()
-        self.settings_button.setObjectName("windowButton")
-        self.settings_button.setIcon(QIcon(create_control_pixmap("settings", 34)))
-        self.settings_button.setIconSize(QSize(30, 30))
-        self.settings_button.setToolTip("\uc124\uc815")
-
         minimize_button = QToolButton()
         minimize_button.setObjectName("windowButton")
         minimize_button.setIcon(QIcon(create_control_pixmap("minimize", 34)))
@@ -1057,8 +1051,6 @@ class NukkiWindow(QMainWindow):
         layout.addWidget(logo, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addLayout(brand_column)
         layout.addStretch(1)
-        layout.addWidget(self.settings_button, 0, Qt.AlignmentFlag.AlignVCenter)
-        layout.addSpacing(16)
         layout.addWidget(minimize_button, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(maximize_button, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(close_button, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -1186,6 +1178,7 @@ class NukkiWindow(QMainWindow):
         self.add_button.setObjectName("uploadButton")
         self.add_button.setIcon(asset_icon("illust_upload_dropzone_white.png"))
         self.add_button.setIconSize(QSize(132, 86))
+        self.add_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.add_button.setMinimumHeight(164)
         self.add_button.clicked.connect(self.select_files)
         self.add_button.files_dropped.connect(self.add_files)
@@ -1810,7 +1803,7 @@ class NukkiWindow(QMainWindow):
         output_format = str(self.settings.get("output_format", "png")).strip().lower()
         self._set_format("jpeg" if output_format == "jpeg" else "png", save=False)
 
-        self.save_name_edit.setText(str(self.settings.get("save_name", "")).strip())
+        self.save_name_edit.clear()
         self.crop_check.setChecked(bool(self.settings.get("crop", DEFAULT_CROP_ENABLED)))
         self.open_folder_check.setChecked(bool(self.settings.get("open_folder", DEFAULT_OPEN_FOLDER_ENABLED)))
         self.path_hint.setText(CURRENT_OUTPUT.format(path=output_dir))
@@ -1874,7 +1867,6 @@ class NukkiWindow(QMainWindow):
             "output_history": self.output_history,
             "output_format": self.current_output_format(),
             "mode": self.selected_mode,
-            "save_name": self.current_save_name(),
             "crop": self.crop_check.isChecked(),
             "open_folder": self.open_folder_check.isChecked(),
             "last_input_dir": self.last_input_dir,

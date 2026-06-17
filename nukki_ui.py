@@ -114,6 +114,7 @@ RESOURCE_ALIASES = {
 DEFAULT_CROP_ENABLED = True
 DEFAULT_OPEN_FOLDER_ENABLED = True
 RESIZE_HANDLE_WIDTH = 24
+RESIZE_GRIP_WIDTH = 16
 RESIZE_LEFT = 0x01
 RESIZE_TOP = 0x02
 RESIZE_RIGHT = 0x04
@@ -437,6 +438,9 @@ def create_control_pixmap(kind: str, size: int = 28, color: str = "#4d5159") -> 
         painter.drawLine(QPointF(size * 0.25, size * 0.55), QPointF(size * 0.75, size * 0.55))
     elif kind == "maximize":
         painter.drawRoundedRect(QRectF(size * 0.34, size * 0.34, size * 0.34, size * 0.34), 2, 2)
+    elif kind == "restore":
+        painter.drawRoundedRect(QRectF(size * 0.28, size * 0.38, size * 0.32, size * 0.32), 2, 2)
+        painter.drawRoundedRect(QRectF(size * 0.40, size * 0.28, size * 0.32, size * 0.32), 2, 2)
     elif kind == "close":
         painter.drawLine(QPointF(size * 0.28, size * 0.28), QPointF(size * 0.72, size * 0.72))
         painter.drawLine(QPointF(size * 0.72, size * 0.28), QPointF(size * 0.28, size * 0.72))
@@ -623,6 +627,40 @@ class QueueListWidget(QListWidget):
             event.acceptProposedAction()
             return
         event.ignore()
+
+
+class ResizeHandle(QWidget):
+    def __init__(self, edges: int, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.edges = edges
+        self.setObjectName("resizeHandle")
+        self.setMouseTracking(True)
+        self.setCursor(QCursor(parent._cursor_for_resize_edges(edges)))  # type: ignore[attr-defined]
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton:
+            parent = self.parentWidget()
+            if parent is not None and hasattr(parent, "_start_resize_from_edges"):
+                if parent._start_resize_from_edges(self.edges, event.globalPosition().toPoint()):  # type: ignore[attr-defined]
+                    event.accept()
+                    return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
+        parent = self.parentWidget()
+        if parent is not None and getattr(parent, "_resize_edges", 0):
+            parent._perform_manual_resize(event.globalPosition().toPoint())  # type: ignore[attr-defined]
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        parent = self.parentWidget()
+        if parent is not None and getattr(parent, "_resize_edges", 0):
+            parent._finish_manual_resize()  # type: ignore[attr-defined]
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class DropAreaButton(QToolButton):
@@ -963,6 +1001,7 @@ class NukkiWindow(QMainWindow):
         self._resize_start_geometry: QRect | None = None
         self._resize_start_global: QPoint | None = None
         self._resize_cursor_shape: Qt.CursorShape | None = None
+        self._resize_handles: list[ResizeHandle] = []
 
         self.setWindowTitle(WINDOW_TITLE)
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
@@ -973,6 +1012,7 @@ class NukkiWindow(QMainWindow):
         self.setWindowIcon(asset_icon("nukki_logo_white.png"))
 
         self._build_ui()
+        self._build_resize_handles()
         self._load_settings_into_ui()
         self._apply_styles()
         app = QApplication.instance()
@@ -1001,7 +1041,16 @@ class NukkiWindow(QMainWindow):
                 global_pos = event.globalPosition().toPoint()
                 edges = self._resize_edges_at_global(global_pos)
                 if edges:
+                    if self._start_system_resize(edges):
+                        event.accept()
+                        return True
                     self._begin_manual_resize(edges, global_pos)
+                    event.accept()
+                    return True
+
+            if event_type == QEvent.Type.MouseButtonDblClick and getattr(event, "button", lambda: None)() == Qt.MouseButton.LeftButton:
+                if self._should_toggle_maximize_from(watched, event.globalPosition().toPoint()):
+                    self.toggle_maximized()
                     event.accept()
                     return True
 
@@ -1027,6 +1076,16 @@ class NukkiWindow(QMainWindow):
                     self._clear_resize_cursor()
 
         return super().eventFilter(watched, event)
+
+    def changeEvent(self, event) -> None:  # type: ignore[override]
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            self._refresh_maximize_button_icon()
+            self._position_resize_handles()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._position_resize_handles()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         app = QApplication.instance()
@@ -1070,6 +1129,76 @@ class NukkiWindow(QMainWindow):
         if on_bottom:
             return HTBOTTOM
         return None
+
+    def _qt_edges_for_resize(self, edges: int) -> Qt.Edge:
+        qt_edges = Qt.Edge(0)
+        if edges & RESIZE_LEFT:
+            qt_edges |= Qt.Edge.LeftEdge
+        if edges & RESIZE_TOP:
+            qt_edges |= Qt.Edge.TopEdge
+        if edges & RESIZE_RIGHT:
+            qt_edges |= Qt.Edge.RightEdge
+        if edges & RESIZE_BOTTOM:
+            qt_edges |= Qt.Edge.BottomEdge
+        return qt_edges
+
+    def _start_system_resize(self, edges: int) -> bool:
+        handle = self.windowHandle()
+        if handle is None or self.isMaximized() or self.isFullScreen():
+            return False
+
+        qt_edges = self._qt_edges_for_resize(edges)
+        if qt_edges == Qt.Edge(0):
+            return False
+
+        try:
+            return bool(handle.startSystemResize(qt_edges))
+        except RuntimeError:
+            return False
+
+    def _build_resize_handles(self) -> None:
+        self._resize_handles = [
+            ResizeHandle(RESIZE_LEFT | RESIZE_TOP, self),
+            ResizeHandle(RESIZE_TOP, self),
+            ResizeHandle(RESIZE_RIGHT | RESIZE_TOP, self),
+            ResizeHandle(RESIZE_RIGHT, self),
+            ResizeHandle(RESIZE_RIGHT | RESIZE_BOTTOM, self),
+            ResizeHandle(RESIZE_BOTTOM, self),
+            ResizeHandle(RESIZE_LEFT | RESIZE_BOTTOM, self),
+            ResizeHandle(RESIZE_LEFT, self),
+        ]
+        self._position_resize_handles()
+
+    def _position_resize_handles(self) -> None:
+        if not self._resize_handles:
+            return
+
+        grip = RESIZE_GRIP_WIDTH
+        width = self.width()
+        height = self.height()
+        geometries = [
+            QRect(0, 0, grip, grip),
+            QRect(grip, 0, max(0, width - grip * 2), grip),
+            QRect(max(0, width - grip), 0, grip, grip),
+            QRect(max(0, width - grip), grip, grip, max(0, height - grip * 2)),
+            QRect(max(0, width - grip), max(0, height - grip), grip, grip),
+            QRect(grip, max(0, height - grip), max(0, width - grip * 2), grip),
+            QRect(0, max(0, height - grip), grip, grip),
+            QRect(0, grip, grip, max(0, height - grip * 2)),
+        ]
+
+        for handle, geometry in zip(self._resize_handles, geometries):
+            handle.setGeometry(geometry)
+            handle.setVisible(not self.isMaximized() and not self.isFullScreen())
+            handle.raise_()
+
+    def _start_resize_from_edges(self, edges: int, global_pos: QPoint) -> bool:
+        if self.isMaximized() or self.isFullScreen():
+            return False
+        if self._start_system_resize(edges):
+            return True
+        self._begin_manual_resize(edges, global_pos)
+        return True
 
     def _resize_edges_at_global(self, global_pos: QPoint) -> int:
         if self.isMaximized() or self.isFullScreen():
@@ -1181,10 +1310,28 @@ class NukkiWindow(QMainWindow):
         self._resize_start_global = None
         self._clear_resize_cursor()
 
+    def _should_toggle_maximize_from(self, watched: QObject, global_pos: QPoint) -> bool:
+        if isinstance(watched, QToolButton) and watched.objectName() == "windowButton":
+            return False
+
+        local_pos = self.mapFromGlobal(global_pos)
+        if self._resize_edges_at_global(global_pos):
+            return False
+        return 0 <= local_pos.x() <= self.width() and 0 <= local_pos.y() <= 136
+
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if self._resize_edges:
             event.accept()
             return
+        if event.button() == Qt.MouseButton.LeftButton:
+            edges = self._resize_edges_at_global(event.globalPosition().toPoint())
+            if edges:
+                if self._start_system_resize(edges):
+                    event.accept()
+                    return
+                self._begin_manual_resize(edges, event.globalPosition().toPoint())
+                event.accept()
+                return
         if event.button() == Qt.MouseButton.LeftButton and event.position().y() <= 136:
             self._drag_start_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             event.accept()
@@ -1209,11 +1356,24 @@ class NukkiWindow(QMainWindow):
             return
         super().mouseReleaseEvent(event)
 
+    def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton and self._should_toggle_maximize_from(self, event.globalPosition().toPoint()):
+            self.toggle_maximized()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
     def toggle_maximized(self) -> None:
         if self.isMaximized():
             self.showNormal()
         else:
             self.showMaximized()
+        self._refresh_maximize_button_icon()
+
+    def _refresh_maximize_button_icon(self) -> None:
+        if hasattr(self, "maximize_button"):
+            icon_kind = "restore" if self.isMaximized() else "maximize"
+            self.maximize_button.setIcon(QIcon(create_control_pixmap(icon_kind, 34)))
 
     def dragEnterEvent(self, event) -> None:  # type: ignore[override]
         if has_local_drop_urls(event):
@@ -1290,11 +1450,11 @@ class NukkiWindow(QMainWindow):
         minimize_button.setIconSize(QSize(30, 30))
         minimize_button.clicked.connect(self.showMinimized)
 
-        maximize_button = QToolButton()
-        maximize_button.setObjectName("windowButton")
-        maximize_button.setIcon(QIcon(create_control_pixmap("maximize", 34)))
-        maximize_button.setIconSize(QSize(30, 30))
-        maximize_button.clicked.connect(self.toggle_maximized)
+        self.maximize_button = QToolButton()
+        self.maximize_button.setObjectName("windowButton")
+        self.maximize_button.setIcon(QIcon(create_control_pixmap("maximize", 34)))
+        self.maximize_button.setIconSize(QSize(30, 30))
+        self.maximize_button.clicked.connect(self.toggle_maximized)
 
         close_button = QToolButton()
         close_button.setObjectName("windowButton")
@@ -1306,14 +1466,14 @@ class NukkiWindow(QMainWindow):
         layout.addLayout(brand_column)
         layout.addStretch(1)
         layout.addWidget(minimize_button, 0, Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(maximize_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self.maximize_button, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(close_button, 0, Qt.AlignmentFlag.AlignVCenter)
         return header
 
     def _build_sidebar(self) -> QFrame:
         sidebar = QFrame()
         sidebar.setObjectName("sidebarFrame")
-        sidebar.setFixedWidth(174)
+        sidebar.setFixedWidth(188)
 
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(16, 18, 16, 16)
@@ -1350,21 +1510,22 @@ class NukkiWindow(QMainWindow):
         guide = QFrame()
         guide.setObjectName("guideCard")
         guide.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        guide.setMinimumHeight(184)
         guide_layout = QVBoxLayout(guide)
-        guide_layout.setContentsMargins(10, 10, 10, 12)
-        guide_layout.setSpacing(7)
+        guide_layout.setContentsMargins(12, 12, 12, 12)
+        guide_layout.setSpacing(8)
 
         guide_image = QLabel()
-        guide_image.setPixmap(asset_pixmap("illust_quick_guide_white.png", 82))
-        guide_image.setFixedSize(82, 58)
+        guide_image.setPixmap(asset_pixmap("illust_quick_guide_white.png", 86))
+        guide_image.setFixedSize(86, 64)
         guide_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        guide_text = QLabel("\uc644\ub8cc\ub41c \uc774\ubbf8\uc9c0\ub97c\n\uc800\uc7a5 \ud3f4\ub354\uc5d0\uc11c \ubc14\ub85c \ud655\uc778\ud558\uc138\uc694.")
+        guide_text = QLabel("\uc644\ub8cc \uc774\ubbf8\uc9c0\ub97c\n\uc800\uc7a5 \ud3f4\ub354\uc5d0\uc11c\n\ubc14\ub85c \ud655\uc778\ud558\uc138\uc694.")
         guide_text.setObjectName("guideText")
         guide_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
         guide_text.setWordWrap(True)
 
-        guide_button = QPushButton("\uc800\uc7a5 \ud3f4\ub354 \uc5f4\uae30  >")
+        guide_button = QPushButton("\uc800\uc7a5 \ud3f4\ub354 \uc5f4\uae30")
         guide_button.setObjectName("guideButton")
         guide_button.clicked.connect(self.open_current_output_folder)
 
@@ -1683,6 +1844,10 @@ class NukkiWindow(QMainWindow):
                 background: transparent;
                 font-family: "Malgun Gothic";
             }
+            #resizeHandle {
+                background: transparent;
+                border: none;
+            }
             QLabel, QCheckBox, QRadioButton, QToolButton, QPushButton {
                 background: transparent;
             }
@@ -1787,15 +1952,15 @@ class NukkiWindow(QMainWindow):
             }
             #guideText {
                 color: #4f5965;
-                font: 700 11px "Malgun Gothic";
+                font: 700 12px "Malgun Gothic";
             }
             #guideButton {
                 background: #ffffff;
                 border: 1px solid #ffb987;
-                border-radius: 7px;
+                border-radius: 8px;
                 color: #ff5a00;
-                font: 800 11px "Malgun Gothic";
-                min-height: 26px;
+                font: 800 12px "Malgun Gothic";
+                min-height: 34px;
             }
             #guideButton:hover {
                 background: #fff1e7;

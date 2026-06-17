@@ -3,6 +3,9 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
+import cv2
+import numpy as np
+from PIL import Image
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
@@ -36,6 +39,154 @@ DEFAULT_VIEWPORT_SIZE = QSize(1080, 760)
 MIN_ZOOM_FACTOR = 0.35
 MAX_ZOOM_FACTOR = 6.0
 ZOOM_STEP = 1.15
+
+
+def load_rgba_array(image_path: Path) -> np.ndarray:
+    with Image.open(image_path) as image:
+        return np.array(image.convert("RGBA"))
+
+
+def region_to_mask(region: NamedRegion, width: int, height: int) -> np.ndarray:
+    mask = np.zeros((height, width), dtype=np.uint8)
+    if width <= 0 or height <= 0:
+        return mask
+
+    if region.shape_key() == POLYGON_MODE:
+        points = np.array(region.normalized_points(width, height), dtype=np.int32)
+        if len(points) >= 3:
+            cv2.fillPoly(mask, [points], 255)
+        return mask
+
+    left, top, right, bottom = region.normalized_box(width, height)
+    mask[top:bottom, left:right] = 255
+    return mask
+
+
+def mask_to_region(mask: np.ndarray, name: str, fallback: NamedRegion) -> NamedRegion:
+    if mask.size == 0:
+        return fallback.copy()
+
+    binary = (mask > 0).astype(np.uint8) * 255
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = [contour for contour in contours if cv2.contourArea(contour) >= 12]
+    if not contours:
+        return fallback.copy()
+
+    contour = max(contours, key=cv2.contourArea)
+    perimeter = cv2.arcLength(contour, True)
+    epsilon = max(1.0, perimeter * 0.006)
+    approx = cv2.approxPolyDP(contour, epsilon, True)
+    while len(approx) > 180 and epsilon < perimeter * 0.04:
+        epsilon *= 1.25
+        approx = cv2.approxPolyDP(contour, epsilon, True)
+
+    raw_points = [(int(point[0][0]), int(point[0][1])) for point in approx]
+    points: list[tuple[int, int]] = []
+    for point in raw_points:
+        if point not in points:
+            points.append(point)
+
+    if len(points) < 3:
+        x, y, width, height = cv2.boundingRect(contour)
+        if width < 2 or height < 2:
+            return fallback.copy()
+        return NamedRegion(name=name, left=x, top=y, right=x + width, bottom=y + height, shape=RECT_MODE)
+
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    return NamedRegion(
+        name=name,
+        left=min(xs),
+        top=min(ys),
+        right=max(xs) + 1,
+        bottom=max(ys) + 1,
+        shape=POLYGON_MODE,
+        points=tuple(points),
+    )
+
+
+def largest_component(mask: np.ndarray) -> np.ndarray:
+    binary = (mask > 0).astype(np.uint8)
+    if int(binary.sum()) == 0:
+        return np.zeros_like(binary, dtype=np.uint8)
+
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
+    if count <= 1:
+        return binary * 255
+
+    largest_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    return (labels == largest_label).astype(np.uint8) * 255
+
+
+def auto_detect_region_from_image(image_path: Path, region: NamedRegion) -> NamedRegion:
+    rgba = load_rgba_array(image_path)
+    height, width = rgba.shape[:2]
+    current_mask = region_to_mask(region, width, height)
+    if int((current_mask > 0).sum()) < 32:
+        return region.copy()
+
+    alpha = rgba[:, :, 3]
+    if alpha.min() < 250:
+        alpha_mask = ((alpha > 12) & (current_mask > 0)).astype(np.uint8) * 255
+        if int((alpha_mask > 0).sum()) >= 32:
+            return mask_to_region(largest_component(alpha_mask), region.name, region)
+
+    rgb = rgba[:, :, :3].astype(np.float32)
+    kernel = np.ones((5, 5), dtype=np.uint8)
+    eroded = cv2.erode(current_mask, kernel, iterations=3)
+    boundary = (current_mask > 0) & (eroded == 0)
+    if int(boundary.sum()) < 24:
+        left, top, right, bottom = region.normalized_box(width, height)
+        boundary = np.zeros((height, width), dtype=bool)
+        boundary[top:bottom, left] = True
+        boundary[top:bottom, max(left, right - 1)] = True
+        boundary[top, left:right] = True
+        boundary[max(top, bottom - 1), left:right] = True
+
+    background = np.median(rgb[boundary], axis=0)
+    distance = np.linalg.norm(rgb - background.reshape(1, 1, 3), axis=2)
+    inside_distances = distance[current_mask > 0]
+    if inside_distances.size == 0:
+        return region.copy()
+
+    threshold = float(np.percentile(inside_distances, 58))
+    threshold = max(28.0, min(78.0, threshold))
+    candidate = ((current_mask > 0) & (distance >= threshold)).astype(np.uint8) * 255
+    candidate = cv2.morphologyEx(candidate, cv2.MORPH_CLOSE, np.ones((9, 9), dtype=np.uint8), iterations=2)
+    candidate = cv2.morphologyEx(candidate, cv2.MORPH_OPEN, np.ones((3, 3), dtype=np.uint8), iterations=1)
+    candidate = largest_component(candidate)
+
+    current_area = max(1, int((current_mask > 0).sum()))
+    candidate_area = int((candidate > 0).sum())
+    if candidate_area < max(32, current_area * 0.03) or candidate_area > current_area * 0.96:
+        grabcut_candidate = grabcut_region_mask(rgba, region, current_mask)
+        if int((grabcut_candidate > 0).sum()) >= max(32, current_area * 0.03):
+            candidate = grabcut_candidate
+
+    return mask_to_region(candidate, region.name, region)
+
+
+def grabcut_region_mask(rgba: np.ndarray, region: NamedRegion, current_mask: np.ndarray) -> np.ndarray:
+    height, width = current_mask.shape[:2]
+    mask = np.full((height, width), cv2.GC_BGD, dtype=np.uint8)
+    mask[current_mask > 0] = cv2.GC_PR_FGD
+
+    kernel = np.ones((9, 9), dtype=np.uint8)
+    sure_foreground = cv2.erode(current_mask, kernel, iterations=2)
+    if int((sure_foreground > 0).sum()) > 32:
+        mask[sure_foreground > 0] = cv2.GC_FGD
+
+    try:
+        bg_model = np.zeros((1, 65), dtype=np.float64)
+        fg_model = np.zeros((1, 65), dtype=np.float64)
+        cv2.grabCut(rgba[:, :, :3], mask, None, bg_model, fg_model, 5, cv2.GC_INIT_WITH_MASK)
+    except cv2.error:
+        return np.zeros_like(current_mask, dtype=np.uint8)
+
+    result = np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
+    result[current_mask == 0] = 0
+    result = cv2.morphologyEx(result, cv2.MORPH_CLOSE, np.ones((7, 7), dtype=np.uint8), iterations=1)
+    return largest_component(result)
 
 
 def create_tool_icon(mode: str, size: int = 22) -> QIcon:
@@ -556,6 +707,7 @@ class RegionCanvas(QFrame):
 
 class RegionDetailCanvas(QFrame):
     region_changed = Signal(object)
+    history_changed = Signal(bool, bool)
 
     def __init__(self, image_path: Path, region: NamedRegion) -> None:
         super().__init__()
@@ -566,17 +718,58 @@ class RegionDetailCanvas(QFrame):
         self.drag_handle = ""
         self.drag_point_index = -1
         self.last_image_point: tuple[int, int] | None = None
+        self.tool_mode = "select"
+        self.brush_size = 28
+        self.stroke_active = False
+        self.stroke_last_image_point: tuple[int, int] | None = None
+        self.undo_stack: list[NamedRegion] = []
+        self.redo_stack: list[NamedRegion] = []
 
         self.setObjectName("detailMaskCanvas")
         self.setMinimumSize(640, 520)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)
         self._normalize_region()
+        self._emit_history_state()
 
-    def set_region(self, region: NamedRegion) -> None:
+    def set_region(self, region: NamedRegion, record: bool = False) -> None:
+        if record:
+            self._push_history()
         self.region = region.copy()
         self._normalize_region()
         self.update()
+        self.region_changed.emit(self.region.copy())
+
+    def set_tool_mode(self, mode: str) -> None:
+        self.tool_mode = mode if mode in {"select", "pen", "eraser"} else "select"
+        self.unsetCursor()
+
+    def set_brush_size(self, size: int) -> None:
+        self.brush_size = max(3, min(160, int(size)))
+
+    def undo(self) -> None:
+        if not self.undo_stack:
+            return
+        self.redo_stack.append(self.region.copy())
+        self.region = self.undo_stack.pop()
+        self.update()
+        self.region_changed.emit(self.region.copy())
+        self._emit_history_state()
+
+    def redo(self) -> None:
+        if not self.redo_stack:
+            return
+        self.undo_stack.append(self.region.copy())
+        self.region = self.redo_stack.pop()
+        self.update()
+        self.region_changed.emit(self.region.copy())
+        self._emit_history_state()
+
+    def auto_detect_region(self) -> None:
+        detected = auto_detect_region_from_image(self.image_path, self.region)
+        if detected.normalized_points(*self._image_size()) == self.region.normalized_points(*self._image_size()):
+            return
+        self.set_region(detected, record=True)
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
         painter = QPainter(self)
@@ -613,6 +806,7 @@ class RegionDetailCanvas(QFrame):
             point_index = self._hit_polygon_point(view_point)
             points = list(self.region.normalized_points(*self._image_size()))
             if point_index >= 0 and len(points) > 3:
+                self._push_history()
                 del points[point_index]
                 self._set_polygon_points(points)
                 self._emit_region_changed()
@@ -623,8 +817,22 @@ class RegionDetailCanvas(QFrame):
             super().mousePressEvent(event)
             return
 
+        if self.tool_mode in {"pen", "eraser"}:
+            image_point = self._view_point_to_image(view_point, clamp=False)
+            if image_point is None:
+                super().mousePressEvent(event)
+                return
+
+            self._push_history()
+            self.stroke_active = True
+            self.stroke_last_image_point = image_point
+            self._apply_brush_stroke(image_point, image_point)
+            event.accept()
+            return
+
         handle = self._hit_rect_handle(view_point)
         if handle:
+            self._push_history()
             self.drag_mode = "rect_handle"
             self.drag_handle = handle
             event.accept()
@@ -632,12 +840,14 @@ class RegionDetailCanvas(QFrame):
 
         point_index = self._hit_polygon_point(view_point)
         if point_index >= 0:
+            self._push_history()
             self.drag_mode = "polygon_point"
             self.drag_point_index = point_index
             event.accept()
             return
 
         if self._region_to_view_path(self.region).contains(QPointF(view_point)):
+            self._push_history()
             self.drag_mode = "move"
             self.last_image_point = self._view_point_to_image(view_point, clamp=True)
             event.accept()
@@ -648,6 +858,13 @@ class RegionDetailCanvas(QFrame):
     def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
         view_point = event.position().toPoint()
         image_point = self._view_point_to_image(view_point, clamp=True)
+
+        if self.stroke_active and self.tool_mode in {"pen", "eraser"} and image_point is not None:
+            start = self.stroke_last_image_point or image_point
+            self._apply_brush_stroke(start, image_point)
+            self.stroke_last_image_point = image_point
+            event.accept()
+            return
 
         if self.drag_mode and image_point is not None:
             if self.drag_mode == "rect_handle":
@@ -671,6 +888,12 @@ class RegionDetailCanvas(QFrame):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        if self.stroke_active:
+            self.stroke_active = False
+            self.stroke_last_image_point = None
+            event.accept()
+            return
+
         if self.drag_mode:
             self.drag_mode = None
             self.drag_handle = ""
@@ -687,6 +910,7 @@ class RegionDetailCanvas(QFrame):
             edge_index = self._hit_polygon_edge(event.position().toPoint())
             image_point = self._view_point_to_image(event.position().toPoint(), clamp=True)
             if edge_index >= 0 and image_point is not None:
+                self._push_history()
                 points = list(self.region.normalized_points(*self._image_size()))
                 points.insert(edge_index + 1, image_point)
                 self._set_polygon_points(points)
@@ -699,6 +923,27 @@ class RegionDetailCanvas(QFrame):
     def _emit_region_changed(self) -> None:
         self.update()
         self.region_changed.emit(self.region.copy())
+
+    def _emit_history_state(self) -> None:
+        self.history_changed.emit(bool(self.undo_stack), bool(self.redo_stack))
+
+    def _push_history(self) -> None:
+        self.undo_stack.append(self.region.copy())
+        if len(self.undo_stack) > 60:
+            self.undo_stack.pop(0)
+        self.redo_stack.clear()
+        self._emit_history_state()
+
+    def _apply_brush_stroke(self, start: tuple[int, int], end: tuple[int, int]) -> None:
+        width, height = self._image_size()
+        mask = region_to_mask(self.region, width, height)
+        value = 255 if self.tool_mode == "pen" else 0
+        thickness = max(3, int(self.brush_size))
+        cv2.line(mask, start, end, value, thickness=thickness, lineType=cv2.LINE_AA)
+        cv2.circle(mask, end, max(1, thickness // 2), value, thickness=-1, lineType=cv2.LINE_AA)
+        next_region = mask_to_region(mask, self.region.name, self.region)
+        self.region = next_region
+        self._emit_region_changed()
 
     def _image_size(self) -> tuple[int, int]:
         return max(1, self.pixmap.width()), max(1, self.pixmap.height())
@@ -804,7 +1049,11 @@ class RegionDetailCanvas(QFrame):
                 painter.drawEllipse(point, 5.2, 5.2)
             return
 
-        for point in self.region.normalized_points(*self._image_size()):
+        points = self.region.normalized_points(*self._image_size())
+        step = max(1, len(points) // 36)
+        for index, point in enumerate(points):
+            if index % step != 0:
+                continue
             painter.drawEllipse(self._image_point_to_view(point), 5.2, 5.2)
 
     def _hit_rect_handle(self, view_point: QPoint) -> str:
@@ -927,6 +1176,9 @@ class RegionDetailCanvas(QFrame):
             self.update()
 
     def _update_hover_cursor(self, view_point: QPoint) -> None:
+        if self.tool_mode in {"pen", "eraser"}:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            return
         if self._hit_rect_handle(view_point) or self._hit_polygon_point(view_point):
             self.setCursor(Qt.CursorShape.SizeAllCursor)
             return
@@ -960,15 +1212,80 @@ class RegionDetailDialog(QDialog):
         title = QLabel("영역 세부 설정")
         title.setObjectName("dialogTitle")
 
-        help_text = QLabel("붉은 영역이 처리 후 남길 마스킹 영역입니다. 미리보기에서 영역을 드래그하거나 오른쪽 좌표값으로 정밀하게 수정할 수 있습니다.")
+        help_text = QLabel("붉은 영역이 처리 후 남길 마스킹 영역입니다. 점/영역 드래그, 펜과 지우개, 오른쪽 좌표값, 자동 설정으로 마스크를 정밀하게 수정할 수 있습니다.")
         help_text.setObjectName("helperText")
         help_text.setWordWrap(True)
 
-        body = QHBoxLayout()
-        body.setSpacing(16)
-
         self.mask_canvas = RegionDetailCanvas(self.image_path, self.region)
         self.mask_canvas.region_changed.connect(self._handle_canvas_region_changed)
+        self.mask_canvas.history_changed.connect(self._update_history_buttons)
+
+        toolbar_row = QHBoxLayout()
+        toolbar_row.setSpacing(8)
+
+        self.undo_button = QPushButton("이전")
+        self.undo_button.setObjectName("smallToolButton")
+        self.undo_button.setToolTip("실행 취소")
+        self.undo_button.clicked.connect(self.mask_canvas.undo)
+        self.undo_button.setEnabled(False)
+
+        self.redo_button = QPushButton("복원")
+        self.redo_button.setObjectName("smallToolButton")
+        self.redo_button.setToolTip("다시 실행")
+        self.redo_button.clicked.connect(self.mask_canvas.redo)
+        self.redo_button.setEnabled(False)
+
+        self.detail_tool_group = QButtonGroup(self)
+        self.detail_tool_group.setExclusive(True)
+
+        self.select_tool = QToolButton()
+        self.select_tool.setObjectName("maskToolButton")
+        self.select_tool.setText("선택")
+        self.select_tool.setCheckable(True)
+        self.select_tool.setChecked(True)
+        self.select_tool.clicked.connect(lambda: self._set_detail_tool("select"))
+
+        self.pen_tool = QToolButton()
+        self.pen_tool.setObjectName("maskToolButton")
+        self.pen_tool.setText("펜")
+        self.pen_tool.setCheckable(True)
+        self.pen_tool.clicked.connect(lambda: self._set_detail_tool("pen"))
+
+        self.eraser_tool = QToolButton()
+        self.eraser_tool.setObjectName("maskToolButton")
+        self.eraser_tool.setText("지우개")
+        self.eraser_tool.setCheckable(True)
+        self.eraser_tool.clicked.connect(lambda: self._set_detail_tool("eraser"))
+
+        for button in (self.select_tool, self.pen_tool, self.eraser_tool):
+            self.detail_tool_group.addButton(button)
+
+        brush_label = QLabel("브러시")
+        brush_label.setObjectName("fieldLabel")
+        self.brush_size_spin = QSpinBox()
+        self.brush_size_spin.setObjectName("brushSizeSpin")
+        self.brush_size_spin.setRange(3, 160)
+        self.brush_size_spin.setValue(28)
+        self.brush_size_spin.valueChanged.connect(self.mask_canvas.set_brush_size)
+
+        auto_button = QPushButton("영역 자동 설정")
+        auto_button.setObjectName("autoButton")
+        auto_button.clicked.connect(self._auto_detect_region)
+
+        toolbar_row.addWidget(self.undo_button)
+        toolbar_row.addWidget(self.redo_button)
+        toolbar_row.addSpacing(10)
+        toolbar_row.addWidget(self.select_tool)
+        toolbar_row.addWidget(self.pen_tool)
+        toolbar_row.addWidget(self.eraser_tool)
+        toolbar_row.addSpacing(10)
+        toolbar_row.addWidget(brush_label)
+        toolbar_row.addWidget(self.brush_size_spin)
+        toolbar_row.addStretch(1)
+        toolbar_row.addWidget(auto_button)
+
+        body = QHBoxLayout()
+        body.setSpacing(16)
 
         side_panel = QFrame()
         side_panel.setObjectName("detailSidePanel")
@@ -1025,6 +1342,7 @@ class RegionDetailDialog(QDialog):
 
         root.addWidget(title)
         root.addWidget(help_text)
+        root.addLayout(toolbar_row)
         root.addLayout(body, 1)
         root.addWidget(buttons)
 
@@ -1068,7 +1386,7 @@ class RegionDetailDialog(QDialog):
                 min-height: 34px;
                 padding: 0 10px;
             }
-            QPushButton {
+            QPushButton, QToolButton#maskToolButton {
                 background: #302944;
                 border: 1px solid #5a4d79;
                 border-radius: 12px;
@@ -1077,8 +1395,31 @@ class RegionDetailDialog(QDialog):
                 font: 600 14px "Malgun Gothic";
                 padding: 0 14px;
             }
-            QPushButton:hover {
+            QPushButton:hover, QToolButton#maskToolButton:hover {
                 background: #3a3153;
+            }
+            QPushButton:disabled {
+                background: #241f30;
+                border-color: #3a3348;
+                color: #777085;
+            }
+            QPushButton#smallToolButton {
+                min-width: 54px;
+                max-width: 72px;
+                padding: 0 10px;
+            }
+            QPushButton#autoButton {
+                min-width: 136px;
+            }
+            QToolButton#maskToolButton {
+                min-width: 72px;
+            }
+            QToolButton#maskToolButton:checked {
+                background: #5f4a98;
+                border-color: #8e74da;
+            }
+            QSpinBox#brushSizeSpin {
+                max-width: 78px;
             }
             QDialogButtonBox QPushButton {
                 min-width: 110px;
@@ -1098,6 +1439,16 @@ class RegionDetailDialog(QDialog):
         label = QLabel(text)
         label.setObjectName("fieldLabel")
         return label
+
+    def _set_detail_tool(self, mode: str) -> None:
+        self.mask_canvas.set_tool_mode(mode)
+
+    def _update_history_buttons(self, can_undo: bool, can_redo: bool) -> None:
+        self.undo_button.setEnabled(can_undo)
+        self.redo_button.setEnabled(can_redo)
+
+    def _auto_detect_region(self) -> None:
+        self.mask_canvas.auto_detect_region()
 
     def _sync_controls_from_region(self) -> None:
         width = max(1, self.pixmap.width())
@@ -1150,7 +1501,7 @@ class RegionDetailDialog(QDialog):
         bottom = min(height, bottom)
 
         self.region = self._region_resized_to_box(self.region, left, top, right, bottom)
-        self.mask_canvas.set_region(self.region)
+        self.mask_canvas.set_region(self.region, record=True)
         self._sync_controls_from_region()
 
     def _region_resized_to_box(self, region: NamedRegion, left: int, top: int, right: int, bottom: int) -> NamedRegion:
@@ -1184,7 +1535,7 @@ class RegionDetailDialog(QDialog):
 
     def _reset_region(self) -> None:
         self.region = self.original_region.copy()
-        self.mask_canvas.set_region(self.region)
+        self.mask_canvas.set_region(self.region, record=True)
         self._sync_controls_from_region()
 
     def result_region(self) -> NamedRegion:

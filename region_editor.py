@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import math
+from io import BytesIO
 from pathlib import Path
 
 import cv2
 import numpy as np
 from PIL import Image
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QButtonGroup,
     QDialog,
@@ -33,6 +34,7 @@ from remove_signature_background import NamedRegion
 
 RECT_MODE = "rect"
 POLYGON_MODE = "polygon"
+MASK_MODE = "mask"
 CANVAS_MARGIN = 8
 CANVAS_FRAME_OUTSET = 4
 DEFAULT_VIEWPORT_SIZE = QSize(1080, 760)
@@ -46,10 +48,29 @@ def load_rgba_array(image_path: Path) -> np.ndarray:
         return np.array(image.convert("RGBA"))
 
 
+def encode_mask_png(mask: np.ndarray) -> bytes:
+    binary = np.clip(mask, 0, 255).astype(np.uint8)
+    buffer = BytesIO()
+    Image.fromarray(binary, "L").save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def decoded_region_mask(region: NamedRegion, width: int, height: int) -> np.ndarray | None:
+    mask_image = region.mask_image(width, height)
+    if mask_image is None:
+        return None
+    return np.array(mask_image, dtype=np.uint8)
+
+
 def region_to_mask(region: NamedRegion, width: int, height: int) -> np.ndarray:
     mask = np.zeros((height, width), dtype=np.uint8)
     if width <= 0 or height <= 0:
         return mask
+
+    if region.shape_key() == MASK_MODE:
+        stored_mask = decoded_region_mask(region, width, height)
+        if stored_mask is not None:
+            return np.clip(stored_mask, 0, 255).astype(np.uint8)
 
     if region.shape_key() == POLYGON_MODE:
         points = np.array(region.normalized_points(width, height), dtype=np.int32)
@@ -60,6 +81,31 @@ def region_to_mask(region: NamedRegion, width: int, height: int) -> np.ndarray:
     left, top, right, bottom = region.normalized_box(width, height)
     mask[top:bottom, left:right] = 255
     return mask
+
+
+def mask_to_region_mask(mask: np.ndarray, name: str, fallback: NamedRegion) -> NamedRegion:
+    if mask.size == 0:
+        return fallback.copy()
+
+    alpha = np.clip(mask, 0, 255).astype(np.uint8)
+    binary = np.where(alpha > 0, 255, 0).astype(np.uint8)
+    ys, xs = np.where(binary > 0)
+    if xs.size < 12 or ys.size < 12:
+        return fallback.copy()
+
+    left = int(xs.min())
+    top = int(ys.min())
+    right = int(xs.max()) + 1
+    bottom = int(ys.max()) + 1
+    return NamedRegion(
+        name=name,
+        left=left,
+        top=top,
+        right=right,
+        bottom=bottom,
+        shape=MASK_MODE,
+        mask_png=encode_mask_png(alpha),
+    )
 
 
 def mask_to_region(mask: np.ndarray, name: str, fallback: NamedRegion) -> NamedRegion:
@@ -165,7 +211,7 @@ def auto_detect_region_from_image(image_path: Path, region: NamedRegion) -> Name
     if alpha.min() < 250:
         alpha_mask = ((alpha > 12) & (current_mask > 0)).astype(np.uint8) * 255
         if int((alpha_mask > 0).sum()) >= 32:
-            return mask_to_region(best_interior_component(alpha_mask, current_mask), region.name, region)
+            return mask_to_region_mask(best_interior_component(alpha_mask, current_mask), region.name, region)
 
     rgb = rgba[:, :, :3].astype(np.float32)
     kernel = np.ones((5, 5), dtype=np.uint8)
@@ -199,7 +245,7 @@ def auto_detect_region_from_image(image_path: Path, region: NamedRegion) -> Name
         if int((grabcut_candidate > 0).sum()) >= max(32, current_area * 0.03):
             candidate = grabcut_candidate
 
-    return mask_to_region(candidate, region.name, region)
+    return mask_to_region_mask(candidate, region.name, region)
 
 
 def grabcut_region_mask(rgba: np.ndarray, region: NamedRegion, current_mask: np.ndarray) -> np.ndarray:
@@ -349,11 +395,14 @@ class RegionCanvas(QFrame):
                     continue
 
                 is_selected = index == self.selected_index
-                painter.setPen(QPen(QColor("#66d08e") if is_selected else QColor("#9e8cff"), 2.4))
-                painter.setBrush(QColor(102, 208, 142, 30) if is_selected else QColor(158, 140, 255, 26))
-                painter.drawPath(path)
+                if region.shape_key() == MASK_MODE:
+                    self._paint_mask_region(painter, region, is_selected, view_rect)
+                else:
+                    painter.setPen(QPen(QColor("#66d08e") if is_selected else QColor("#9e8cff"), 2.4))
+                    painter.setBrush(QColor(102, 208, 142, 30) if is_selected else QColor(158, 140, 255, 26))
+                    painter.drawPath(path)
 
-                if is_selected:
+                if is_selected and region.shape_key() != MASK_MODE:
                     painter.setPen(Qt.PenStyle.NoPen)
                     painter.setBrush(QColor("#66d08e"))
                     for point in self._region_to_view_points(region):
@@ -680,6 +729,30 @@ class RegionCanvas(QFrame):
         path.closeSubpath()
         return path
 
+    def _paint_mask_region(self, painter: QPainter, region: NamedRegion, is_selected: bool, image_rect: QRect) -> None:
+        if self.pixmap.isNull():
+            return
+
+        width = max(1, self.pixmap.width())
+        height = max(1, self.pixmap.height())
+        mask = region_to_mask(region, width, height)
+        if int((mask > 0).sum()) == 0:
+            return
+
+        selected = mask > 0
+        fill = np.array([102, 208, 142, 72] if is_selected else [158, 140, 255, 56], dtype=np.uint8)
+        edge_fill = np.array([102, 208, 142, 235] if is_selected else [158, 140, 255, 220], dtype=np.uint8)
+        overlay = np.zeros((height, width, 4), dtype=np.uint8)
+        overlay[selected] = fill
+
+        binary = selected.astype(np.uint8) * 255
+        edge = cv2.morphologyEx(binary, cv2.MORPH_GRADIENT, np.ones((3, 3), dtype=np.uint8))
+        overlay[edge > 0] = edge_fill
+
+        overlay = np.ascontiguousarray(overlay)
+        image = QImage(overlay.data, width, height, width * 4, QImage.Format.Format_RGBA8888).copy()
+        painter.drawImage(image_rect, image)
+
     def _hit_test(self, point: QPoint) -> int:
         point_f = QPointF(point)
         for index in range(len(self.regions) - 1, -1, -1):
@@ -813,7 +886,10 @@ class RegionDetailCanvas(QFrame):
         source_region = self.auto_source_region if self.auto_result_active else self.region.copy()
         detected = auto_detect_region_from_image(self.image_path, source_region)
         detected.name = self.region.name
-        if detected.normalized_points(*self._image_size()) == self.region.normalized_points(*self._image_size()):
+        width, height = self._image_size()
+        current_mask = region_to_mask(self.region, width, height)
+        detected_mask = region_to_mask(detected, width, height)
+        if np.array_equal(current_mask > 0, detected_mask > 0):
             return
         self._push_history(manual=False)
         self.region = detected.copy()
@@ -832,18 +908,22 @@ class RegionDetailCanvas(QFrame):
             painter.fillRect(image_rect.adjusted(-4, -4, 4, 4), QColor("#262230"))
             painter.drawPixmap(image_rect, self.pixmap)
 
-            region_path = self._region_to_view_path(self.region)
-            if not region_path.isEmpty():
-                outside_path = QPainterPath()
-                outside_path.addRect(QRectF(image_rect))
-                outside_path = outside_path.subtracted(region_path)
-                painter.fillPath(outside_path, QColor(10, 8, 15, 125))
-
-                painter.setPen(QPen(QColor("#ffebe8"), 2.2))
-                painter.setBrush(QColor(255, 53, 53, 108))
-                painter.drawPath(region_path)
-                self._paint_handles(painter)
+            if self.region.shape_key() == MASK_MODE:
+                self._paint_mask_region(painter, image_rect)
                 self._paint_brush_preview(painter)
+            else:
+                region_path = self._region_to_view_path(self.region)
+                if not region_path.isEmpty():
+                    outside_path = QPainterPath()
+                    outside_path.addRect(QRectF(image_rect))
+                    outside_path = outside_path.subtracted(region_path)
+                    painter.fillPath(outside_path, QColor(10, 8, 15, 125))
+
+                    painter.setPen(QPen(QColor("#ffebe8"), 2.2))
+                    painter.setBrush(QColor(255, 53, 53, 108))
+                    painter.drawPath(region_path)
+                    self._paint_handles(painter)
+                    self._paint_brush_preview(painter)
 
         painter.end()
         super().paintEvent(event)
@@ -898,7 +978,7 @@ class RegionDetailCanvas(QFrame):
             event.accept()
             return
 
-        if self._region_to_view_path(self.region).contains(QPointF(view_point)):
+        if self._region_contains_view_point(view_point):
             self._push_history()
             self.drag_mode = "move"
             self.last_image_point = self._view_point_to_image(view_point, clamp=True)
@@ -1004,7 +1084,7 @@ class RegionDetailCanvas(QFrame):
         thickness = max(3, int(self.brush_size))
         cv2.line(mask, start, end, value, thickness=thickness, lineType=cv2.LINE_AA)
         cv2.circle(mask, end, max(1, thickness // 2), value, thickness=-1, lineType=cv2.LINE_AA)
-        next_region = mask_to_region(mask, self.region.name, self.region)
+        next_region = mask_to_region_mask(mask, self.region.name, self.region)
         self.region = next_region
         self._emit_region_changed()
 
@@ -1013,6 +1093,11 @@ class RegionDetailCanvas(QFrame):
 
     def _normalize_region(self) -> None:
         width, height = self._image_size()
+        if self.region.shape_key() == MASK_MODE:
+            mask = region_to_mask(self.region, width, height)
+            self.region = mask_to_region_mask(mask, self.region.name, self.region)
+            return
+
         if self.region.shape_key() == POLYGON_MODE:
             points = self.region.normalized_points(width, height)
             self._set_polygon_points(points, emit=False)
@@ -1083,6 +1168,31 @@ class RegionDetailCanvas(QFrame):
         path.closeSubpath()
         return path
 
+    def _paint_mask_region(self, painter: QPainter, image_rect: QRect) -> None:
+        width, height = self._image_size()
+        mask = region_to_mask(self.region, width, height)
+        if int((mask > 0).sum()) == 0:
+            return
+
+        selected = mask > 0
+        overlay = np.zeros((height, width, 4), dtype=np.uint8)
+        overlay[:, :, 0] = 10
+        overlay[:, :, 1] = 8
+        overlay[:, :, 2] = 15
+        overlay[:, :, 3] = 125
+        overlay[selected, 0] = 255
+        overlay[selected, 1] = 53
+        overlay[selected, 2] = 53
+        overlay[selected, 3] = np.maximum(96, (mask[selected].astype(np.uint16) * 110 // 255).astype(np.uint8))
+
+        binary = selected.astype(np.uint8) * 255
+        edge = cv2.morphologyEx(binary, cv2.MORPH_GRADIENT, np.ones((3, 3), dtype=np.uint8))
+        overlay[edge > 0] = np.array([255, 235, 232, 235], dtype=np.uint8)
+
+        overlay = np.ascontiguousarray(overlay)
+        image = QImage(overlay.data, width, height, width * 4, QImage.Format.Format_RGBA8888).copy()
+        painter.drawImage(image_rect, image)
+
     def _rect_handle_points(self) -> dict[str, QPointF]:
         if self.region.shape_key() != RECT_MODE:
             return {}
@@ -1105,7 +1215,7 @@ class RegionDetailCanvas(QFrame):
         }
 
     def _paint_handles(self, painter: QPainter) -> None:
-        if self.tool_mode in {"pen", "eraser"}:
+        if self.tool_mode in {"pen", "eraser"} or self.region.shape_key() == MASK_MODE:
             return
 
         painter.setPen(QPen(QColor("#ffffff"), 1.4))
@@ -1227,6 +1337,24 @@ class RegionDetailCanvas(QFrame):
             return 0, 0
 
         width, height = self._image_size()
+        if self.region.shape_key() == MASK_MODE:
+            mask = region_to_mask(self.region, width, height)
+            left, top, right, bottom = self.region.normalized_box(width, height)
+            dx = max(-left, min(dx, width - right))
+            dy = max(-top, min(dy, height - bottom))
+            shifted = np.zeros_like(mask)
+            source_left = max(0, -dx)
+            source_top = max(0, -dy)
+            source_right = min(width, width - dx)
+            source_bottom = min(height, height - dy)
+            target_left = source_left + dx
+            target_top = source_top + dy
+            target_right = source_right + dx
+            target_bottom = source_bottom + dy
+            shifted[target_top:target_bottom, target_left:target_right] = mask[source_top:source_bottom, source_left:source_right]
+            self.region = mask_to_region_mask(shifted, self.region.name, self.region)
+            return dx, dy
+
         if self.region.shape_key() == POLYGON_MODE:
             points = self.region.normalized_points(width, height)
             min_x = min(point[0] for point in points)
@@ -1274,10 +1402,23 @@ class RegionDetailCanvas(QFrame):
         if self._hit_rect_handle(view_point) or self._hit_polygon_point(view_point):
             self.setCursor(Qt.CursorShape.SizeAllCursor)
             return
-        if self._region_to_view_path(self.region).contains(QPointF(view_point)):
+        if self._region_contains_view_point(view_point):
             self.setCursor(Qt.CursorShape.OpenHandCursor)
             return
         self.unsetCursor()
+
+    def _region_contains_view_point(self, view_point: QPoint) -> bool:
+        if self.region.shape_key() != MASK_MODE:
+            return self._region_to_view_path(self.region).contains(QPointF(view_point))
+
+        image_point = self._view_point_to_image(view_point, clamp=False)
+        if image_point is None:
+            return False
+
+        width, height = self._image_size()
+        mask = region_to_mask(self.region, width, height)
+        x, y = image_point
+        return 0 <= x < width and 0 <= y < height and mask[y, x] > 0
 
 
 class RegionDetailDialog(QDialog):
@@ -1551,8 +1692,14 @@ class RegionDetailDialog(QDialog):
         width = max(1, self.pixmap.width())
         height = max(1, self.pixmap.height())
         left, top, right, bottom = self.region.normalized_box(width, height)
-        shape_label = "다각형" if self.region.shape_key() == POLYGON_MODE else "사각형"
-        point_count = len(self.region.points) if self.region.shape_key() == POLYGON_MODE else 4
+        shape_key = self.region.shape_key()
+        shape_label = "마스크" if shape_key == MASK_MODE else "다각형" if shape_key == POLYGON_MODE else "사각형"
+        if shape_key == MASK_MODE:
+            mask = region_to_mask(self.region, width, height)
+            point_text = f"마스크 픽셀: {int((mask > 0).sum()):,}"
+        else:
+            point_count = len(self.region.points) if shape_key == POLYGON_MODE else 4
+            point_text = f"점 개수: {point_count}"
 
         self._updating_controls = True
         self.name_input.setText(self.region.name)
@@ -1565,7 +1712,7 @@ class RegionDetailDialog(QDialog):
         self.top_spin.setValue(top)
         self.bottom_spin.setValue(bottom)
         self.shape_label.setText(f"형태: {shape_label}")
-        self.point_label.setText(f"점 개수: {point_count}")
+        self.point_label.setText(point_text)
         self._updating_controls = False
 
     def _handle_canvas_region_changed(self, region: NamedRegion) -> None:
@@ -1602,6 +1749,19 @@ class RegionDetailDialog(QDialog):
         self._sync_controls_from_region()
 
     def _region_resized_to_box(self, region: NamedRegion, left: int, top: int, right: int, bottom: int) -> NamedRegion:
+        if region.shape_key() == MASK_MODE:
+            width = max(1, self.pixmap.width())
+            height = max(1, self.pixmap.height())
+            old_left, old_top, old_right, old_bottom = region.normalized_box(width, height)
+            mask = region_to_mask(region, width, height)
+            cropped = mask[old_top:old_bottom, old_left:old_right]
+            new_width = max(1, right - left)
+            new_height = max(1, bottom - top)
+            resized = cv2.resize(cropped, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+            next_mask = np.zeros((height, width), dtype=np.uint8)
+            next_mask[top:bottom, left:right] = resized[: bottom - top, : right - left]
+            return mask_to_region_mask(next_mask, region.name, region)
+
         if region.shape_key() != POLYGON_MODE:
             return NamedRegion(region.name, left, top, right, bottom, RECT_MODE)
 
@@ -1945,16 +2105,18 @@ class RegionEditorDialog(QDialog):
             self._select_region(-1)
 
     def _region_item_text(self, region: NamedRegion) -> str:
-        shape_label = "다각형" if region.shape_key() == POLYGON_MODE else "사각형"
+        shape_key = region.shape_key()
+        shape_label = "마스크" if shape_key == MASK_MODE else "다각형" if shape_key == POLYGON_MODE else "사각형"
         return f"[{shape_label}] {region.name}"
 
     def _region_detail_text(self, region: NamedRegion) -> str:
-        shape_label = "다각형" if region.shape_key() == POLYGON_MODE else "사각형"
-        point_count = len(region.points) if region.shape_key() == POLYGON_MODE else 4
+        shape_key = region.shape_key()
+        shape_label = "마스크" if shape_key == MASK_MODE else "다각형" if shape_key == POLYGON_MODE else "사각형"
+        point_text = "마스크 영역" if shape_key == MASK_MODE else f"점 개수: {len(region.points) if shape_key == POLYGON_MODE else 4}"
         return (
             f"이름: {region.name}\n"
             f"형태: {shape_label}\n"
-            f"점 개수: {point_count}\n"
+            f"{point_text}\n"
             f"x: {region.left} - {region.right}\n"
             f"y: {region.top} - {region.bottom}"
         )

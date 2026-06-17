@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, replace
+from io import BytesIO
 from pathlib import Path
 
 import cv2
@@ -34,10 +35,23 @@ class NamedRegion:
     bottom: int
     shape: str = "rect"
     points: tuple[tuple[int, int], ...] = ()
+    mask_png: bytes = b""
 
     def normalized_box(self, width: int, height: int) -> tuple[int, int, int, int]:
         if width <= 0 or height <= 0:
             raise ValueError("Image dimensions must be positive.")
+
+        if self.shape_key() == "mask":
+            mask = self.mask_image(width, height)
+            if mask is not None:
+                bbox = mask.getbbox()
+                if bbox is not None:
+                    left, top, right, bottom = bbox
+                    left = max(0, min(left, width - 1))
+                    top = max(0, min(top, height - 1))
+                    right = max(left + 1, min(right, width))
+                    bottom = max(top + 1, min(bottom, height))
+                    return left, top, right, bottom
 
         if self.shape_key() == "polygon" and len(self.points) >= 3:
             normalized_points = self.normalized_points(width, height)
@@ -65,7 +79,7 @@ class NamedRegion:
             if len(set(normalized)) >= 3:
                 return normalized
 
-        left, top, right, bottom = self._normalized_rect_box(width, height)
+        left, top, right, bottom = self.normalized_box(width, height)
         return [
             (left, top),
             (max(left, right - 1), top),
@@ -74,7 +88,23 @@ class NamedRegion:
         ]
 
     def shape_key(self) -> str:
+        if self.shape == "mask" and self.mask_png:
+            return "mask"
         return "polygon" if self.shape == "polygon" and len(self.points) >= 3 else "rect"
+
+    def mask_image(self, width: int, height: int) -> Image.Image | None:
+        if self.shape != "mask" or not self.mask_png or width <= 0 or height <= 0:
+            return None
+
+        try:
+            with Image.open(BytesIO(self.mask_png)) as image:
+                mask = image.convert("L")
+        except Exception:
+            return None
+
+        if mask.size != (width, height):
+            mask = mask.resize((width, height), Image.Resampling.NEAREST)
+        return mask
 
     def copy(self) -> "NamedRegion":
         return NamedRegion(
@@ -85,6 +115,7 @@ class NamedRegion:
             bottom=self.bottom,
             shape=self.shape_key(),
             points=tuple((int(x), int(y)) for x, y in self.points),
+            mask_png=bytes(self.mask_png),
         )
 
     def _normalized_rect_box(self, width: int, height: int) -> tuple[int, int, int, int]:
@@ -399,6 +430,17 @@ def apply_polygon_mask(image: Image.Image, polygon_points: list[tuple[int, int]]
     return masked
 
 
+def apply_alpha_mask(image: Image.Image, alpha_mask: Image.Image) -> Image.Image:
+    masked = image.convert("RGBA")
+    local_mask = alpha_mask.convert("L")
+    if local_mask.size != masked.size:
+        local_mask = local_mask.resize(masked.size, Image.Resampling.NEAREST)
+
+    combined_alpha = ImageChops.multiply(masked.getchannel("A"), local_mask)
+    masked.putalpha(combined_alpha)
+    return masked
+
+
 def remove_background_from_image(image: Image.Image, options: RemovalOptions | None = None) -> tuple[Image.Image, str]:
     options = options or RemovalOptions()
     rgb_image = image.convert("RGB")
@@ -549,10 +591,16 @@ def process_image_regions(
             region_image = rgb_image.crop((left, top, right, bottom))
             result, method = remove_background_from_image(region_image, options=region_options)
 
-            if region.shape_key() == "polygon":
+            region_shape = region.shape_key()
+            if region_shape == "polygon":
                 polygon_points = region.normalized_points(width, height)
                 local_points = [(x - left, y - top) for x, y in polygon_points]
                 result = apply_polygon_mask(result, local_points)
+            elif region_shape == "mask":
+                mask_image = region.mask_image(width, height)
+                if mask_image is not None:
+                    local_mask = mask_image.crop((left, top, right, bottom))
+                    result = apply_alpha_mask(result, local_mask)
 
             if options.crop:
                 result = crop_to_visible_area(result, padding=options.padding)

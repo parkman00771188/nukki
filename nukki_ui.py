@@ -10,7 +10,7 @@ from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, QSize, Qt, QStandardPaths, QThread, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QStandardPaths, QThread, Signal, Slot
 from PySide6.QtGui import QColor, QCursor, QFont, QIcon, QImageReader, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -114,6 +114,10 @@ RESOURCE_ALIASES = {
 DEFAULT_CROP_ENABLED = True
 DEFAULT_OPEN_FOLDER_ENABLED = True
 RESIZE_HANDLE_WIDTH = 24
+RESIZE_LEFT = 0x01
+RESIZE_TOP = 0x02
+RESIZE_RIGHT = 0x04
+RESIZE_BOTTOM = 0x08
 PROCESS_MODE_BACKGROUND = "background"
 PROCESS_MODE_SCAN = "scan"
 BACKGROUND_OUTPUT_SUFFIX = "_transparent"
@@ -955,6 +959,10 @@ class NukkiWindow(QMainWindow):
         saved_mode = str(self.settings.get("mode", PROCESS_MODE_BACKGROUND)).strip().lower()
         self.selected_mode = PROCESS_MODE_SCAN if saved_mode == PROCESS_MODE_SCAN else PROCESS_MODE_BACKGROUND
         self._drag_start_position: QPoint | None = None
+        self._resize_edges = 0
+        self._resize_start_geometry: QRect | None = None
+        self._resize_start_global: QPoint | None = None
+        self._resize_cursor_shape: Qt.CursorShape | None = None
 
         self.setWindowTitle(WINDOW_TITLE)
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
@@ -967,6 +975,9 @@ class NukkiWindow(QMainWindow):
         self._build_ui()
         self._load_settings_into_ui()
         self._apply_styles()
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
 
     def nativeEvent(self, event_type, message):  # type: ignore[override]
         if sys.platform.startswith("win"):
@@ -981,6 +992,48 @@ class NukkiWindow(QMainWindow):
                     return True, hit_result
 
         return super().nativeEvent(event_type, message)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]
+        if isinstance(watched, QWidget) and (watched is self or self.isAncestorOf(watched)):
+            event_type = event.type()
+
+            if event_type == QEvent.Type.MouseButtonPress and getattr(event, "button", lambda: None)() == Qt.MouseButton.LeftButton:
+                global_pos = event.globalPosition().toPoint()
+                edges = self._resize_edges_at_global(global_pos)
+                if edges:
+                    self._begin_manual_resize(edges, global_pos)
+                    event.accept()
+                    return True
+
+            if event_type == QEvent.Type.MouseMove and hasattr(event, "globalPosition"):
+                global_pos = event.globalPosition().toPoint()
+                if self._resize_edges and self._resize_start_geometry is not None and self._resize_start_global is not None:
+                    self._perform_manual_resize(global_pos)
+                    event.accept()
+                    return True
+                if not getattr(event, "buttons", lambda: Qt.MouseButton.NoButton)() & Qt.MouseButton.LeftButton:
+                    self._update_resize_cursor(global_pos)
+
+            if event_type == QEvent.Type.MouseButtonRelease:
+                if self._resize_edges:
+                    self._finish_manual_resize()
+                    event.accept()
+                    return True
+                if hasattr(event, "globalPosition"):
+                    self._update_resize_cursor(event.globalPosition().toPoint())
+
+            if event_type in (QEvent.Type.Leave, QEvent.Type.WindowDeactivate):
+                if not self._resize_edges:
+                    self._clear_resize_cursor()
+
+        return super().eventFilter(watched, event)
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+        self._clear_resize_cursor(force=True)
+        super().closeEvent(event)
 
     def _resize_hit_test(self, global_pos: QPoint) -> int | None:
         if self.isMaximized() or self.isFullScreen():
@@ -1018,7 +1071,120 @@ class NukkiWindow(QMainWindow):
             return HTBOTTOM
         return None
 
+    def _resize_edges_at_global(self, global_pos: QPoint) -> int:
+        if self.isMaximized() or self.isFullScreen():
+            return 0
+
+        local_pos = self.mapFromGlobal(global_pos)
+        x = local_pos.x()
+        y = local_pos.y()
+        width = self.width()
+        height = self.height()
+
+        if x < 0 or y < 0 or x > width or y > height:
+            return 0
+
+        edges = 0
+        if x <= RESIZE_HANDLE_WIDTH:
+            edges |= RESIZE_LEFT
+        if x >= width - RESIZE_HANDLE_WIDTH:
+            edges |= RESIZE_RIGHT
+        if y <= RESIZE_HANDLE_WIDTH:
+            edges |= RESIZE_TOP
+        if y >= height - RESIZE_HANDLE_WIDTH:
+            edges |= RESIZE_BOTTOM
+        return edges
+
+    def _cursor_for_resize_edges(self, edges: int) -> Qt.CursorShape | None:
+        if edges in (RESIZE_LEFT | RESIZE_TOP, RESIZE_RIGHT | RESIZE_BOTTOM):
+            return Qt.CursorShape.SizeFDiagCursor
+        if edges in (RESIZE_RIGHT | RESIZE_TOP, RESIZE_LEFT | RESIZE_BOTTOM):
+            return Qt.CursorShape.SizeBDiagCursor
+        if edges & (RESIZE_LEFT | RESIZE_RIGHT):
+            return Qt.CursorShape.SizeHorCursor
+        if edges & (RESIZE_TOP | RESIZE_BOTTOM):
+            return Qt.CursorShape.SizeVerCursor
+        return None
+
+    def _update_resize_cursor(self, global_pos: QPoint) -> None:
+        shape = self._cursor_for_resize_edges(self._resize_edges_at_global(global_pos))
+        if shape is None:
+            self._clear_resize_cursor()
+            return
+        if self._resize_cursor_shape == shape:
+            return
+        if self._resize_cursor_shape is None:
+            QApplication.setOverrideCursor(QCursor(shape))
+        else:
+            QApplication.changeOverrideCursor(QCursor(shape))
+        self._resize_cursor_shape = shape
+
+    def _clear_resize_cursor(self, force: bool = False) -> None:
+        if self._resize_cursor_shape is not None and (force or not self._resize_edges):
+            QApplication.restoreOverrideCursor()
+            self._resize_cursor_shape = None
+
+    def _begin_manual_resize(self, edges: int, global_pos: QPoint) -> None:
+        self._resize_edges = edges
+        self._resize_start_geometry = self.geometry()
+        self._resize_start_global = global_pos
+        shape = self._cursor_for_resize_edges(edges)
+        if shape is not None:
+            if self._resize_cursor_shape is None:
+                QApplication.setOverrideCursor(QCursor(shape))
+            else:
+                QApplication.changeOverrideCursor(QCursor(shape))
+            self._resize_cursor_shape = shape
+
+    def _perform_manual_resize(self, global_pos: QPoint) -> None:
+        if self._resize_start_geometry is None or self._resize_start_global is None:
+            return
+
+        delta = global_pos - self._resize_start_global
+        geometry = self._resize_start_geometry
+        x = geometry.x()
+        y = geometry.y()
+        width = geometry.width()
+        height = geometry.height()
+        min_width = self.minimumWidth()
+        min_height = self.minimumHeight()
+
+        if self._resize_edges & RESIZE_LEFT:
+            new_x = x + delta.x()
+            new_width = width - delta.x()
+            if new_width < min_width:
+                new_x = x + width - min_width
+                new_width = min_width
+            x = new_x
+            width = new_width
+
+        if self._resize_edges & RESIZE_RIGHT:
+            width = max(min_width, width + delta.x())
+
+        if self._resize_edges & RESIZE_TOP:
+            new_y = y + delta.y()
+            new_height = height - delta.y()
+            if new_height < min_height:
+                new_y = y + height - min_height
+                new_height = min_height
+            y = new_y
+            height = new_height
+
+        if self._resize_edges & RESIZE_BOTTOM:
+            height = max(min_height, height + delta.y())
+
+        self.setGeometry(x, y, width, height)
+
+    def _finish_manual_resize(self) -> None:
+        self._resize_edges = 0
+        self._resize_start_geometry = None
+        self._resize_start_global = None
+        self._clear_resize_cursor()
+
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if self._resize_edges:
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton and event.position().y() <= 136:
             self._drag_start_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             event.accept()
@@ -1026,6 +1192,9 @@ class NukkiWindow(QMainWindow):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
+        if self._resize_edges:
+            event.accept()
+            return
         if self._drag_start_position is not None and event.buttons() & Qt.MouseButton.LeftButton:
             self.move(event.globalPosition().toPoint() - self._drag_start_position)
             event.accept()
@@ -1034,6 +1203,10 @@ class NukkiWindow(QMainWindow):
 
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
         self._drag_start_position = None
+        if self._resize_edges:
+            self._finish_manual_resize()
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
 
     def toggle_maximized(self) -> None:
@@ -1186,13 +1359,14 @@ class NukkiWindow(QMainWindow):
         guide_image.setFixedSize(82, 58)
         guide_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        guide_text = QLabel("\ub354 \ube60\ub974\uace0 \uac04\ud3b8\ud558\uac8c\n\uc774\ubbf8\uc9c0\ub97c \ucc98\ub9ac\ud558\uc138\uc694!")
+        guide_text = QLabel("\uc644\ub8cc\ub41c \uc774\ubbf8\uc9c0\ub97c\n\uc800\uc7a5 \ud3f4\ub354\uc5d0\uc11c \ubc14\ub85c \ud655\uc778\ud558\uc138\uc694.")
         guide_text.setObjectName("guideText")
         guide_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
         guide_text.setWordWrap(True)
 
-        guide_button = QPushButton("\uc0ac\uc6a9 \uac00\uc774\ub4dc  >")
+        guide_button = QPushButton("\uc800\uc7a5 \ud3f4\ub354 \uc5f4\uae30  >")
         guide_button.setObjectName("guideButton")
+        guide_button.clicked.connect(self.open_current_output_folder)
 
         guide_layout.addWidget(guide_image, 0, Qt.AlignmentFlag.AlignHCenter)
         guide_layout.addWidget(guide_text)
@@ -1222,7 +1396,7 @@ class NukkiWindow(QMainWindow):
 
         right_column = QVBoxLayout()
         right_column.setSpacing(12)
-        right_column.addWidget(self._build_output_card())
+        right_column.addWidget(self._build_output_card(), 3)
         right_column.addWidget(self._build_log_card(), 1)
 
         grid.addLayout(left_column, 3)
@@ -1283,8 +1457,8 @@ class NukkiWindow(QMainWindow):
     def _build_output_card(self) -> QFrame:
         card = QFrame()
         card.setObjectName("card")
-        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        card.setMinimumHeight(292)
+        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        card.setMinimumHeight(340)
         layout = QVBoxLayout(card)
         layout.setContentsMargins(22, 20, 22, 20)
         layout.setSpacing(10)
@@ -1458,7 +1632,9 @@ class NukkiWindow(QMainWindow):
     def _build_log_card(self) -> QFrame:
         card = QFrame()
         card.setObjectName("card")
-        card.setMaximumHeight(286)
+        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        card.setMinimumHeight(210)
+        card.setMaximumHeight(260)
         layout = QVBoxLayout(card)
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(10)
@@ -1933,6 +2109,17 @@ class NukkiWindow(QMainWindow):
 
     def current_save_name(self) -> str:
         return self.save_name_edit.text().strip()
+
+    def open_current_output_folder(self) -> None:
+        output_dir = self.current_output_dir() or str(default_output_dir())
+        output_path = Path(output_dir).expanduser()
+        try:
+            output_path.mkdir(parents=True, exist_ok=True)
+            self._remember_output_dir(str(output_path))
+            self.save_ui_settings()
+            open_folder_in_explorer(output_path)
+        except OSError as exc:
+            QMessageBox.warning(self, ERROR_TITLE, f"\uc800\uc7a5 \ud3f4\ub354\ub97c \uc5f4 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4.\n{exc}")
 
     def _set_format(self, value: str, save: bool = True) -> None:
         is_jpeg = value == "jpeg"

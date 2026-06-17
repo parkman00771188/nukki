@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import sys
@@ -10,7 +11,7 @@ from io import BytesIO
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, QSize, Qt, QStandardPaths, QThread, Signal, Slot
-from PySide6.QtGui import QColor, QFont, QIcon, QImageReader, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QCursor, QFont, QIcon, QImageReader, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -47,6 +48,24 @@ from remove_signature_background import (
     process_image_regions,
     sanitize_output_stem,
 )
+
+
+class NativePoint(ctypes.Structure):
+    _fields_ = [
+        ("x", ctypes.c_long),
+        ("y", ctypes.c_long),
+    ]
+
+
+class NativeMessage(ctypes.Structure):
+    _fields_ = [
+        ("hwnd", ctypes.c_void_p),
+        ("message", ctypes.c_uint),
+        ("wParam", ctypes.c_void_p),
+        ("lParam", ctypes.c_void_p),
+        ("time", ctypes.c_uint),
+        ("pt", NativePoint),
+    ]
 
 APP_NAME = "Nukki"
 WINDOW_TITLE = "Nukki"
@@ -94,10 +113,21 @@ RESOURCE_ALIASES = {
 }
 DEFAULT_CROP_ENABLED = True
 DEFAULT_OPEN_FOLDER_ENABLED = True
+RESIZE_HANDLE_WIDTH = 24
 PROCESS_MODE_BACKGROUND = "background"
 PROCESS_MODE_SCAN = "scan"
 BACKGROUND_OUTPUT_SUFFIX = "_transparent"
 SCAN_OUTPUT_SUFFIX = "_scan"
+
+WM_NCHITTEST = 0x0084
+HTLEFT = 10
+HTRIGHT = 11
+HTTOP = 12
+HTTOPLEFT = 13
+HTTOPRIGHT = 14
+HTBOTTOM = 15
+HTBOTTOMLEFT = 16
+HTBOTTOMRIGHT = 17
 
 APP_SUBTITLE = "\uc774\ubbf8\uc9c0 \ubc30\uacbd \uc81c\uac70 \ud504\ub85c\uadf8\ub7a8"
 UPLOAD_TITLE = "\uc774\ubbf8\uc9c0 \ucd94\uac00"
@@ -937,6 +967,56 @@ class NukkiWindow(QMainWindow):
         self._build_ui()
         self._load_settings_into_ui()
         self._apply_styles()
+
+    def nativeEvent(self, event_type, message):  # type: ignore[override]
+        if sys.platform.startswith("win"):
+            try:
+                native_message = NativeMessage.from_address(int(message))
+            except (TypeError, ValueError):
+                native_message = None
+
+            if native_message is not None and native_message.message == WM_NCHITTEST:
+                hit_result = self._resize_hit_test(QCursor.pos())
+                if hit_result is not None:
+                    return True, hit_result
+
+        return super().nativeEvent(event_type, message)
+
+    def _resize_hit_test(self, global_pos: QPoint) -> int | None:
+        if self.isMaximized() or self.isFullScreen():
+            return None
+
+        local_pos = self.mapFromGlobal(global_pos)
+        x = local_pos.x()
+        y = local_pos.y()
+        width = self.width()
+        height = self.height()
+
+        if x < 0 or y < 0 or x > width or y > height:
+            return None
+
+        on_left = x <= RESIZE_HANDLE_WIDTH
+        on_right = x >= width - RESIZE_HANDLE_WIDTH
+        on_top = y <= RESIZE_HANDLE_WIDTH
+        on_bottom = y >= height - RESIZE_HANDLE_WIDTH
+
+        if on_top and on_left:
+            return HTTOPLEFT
+        if on_top and on_right:
+            return HTTOPRIGHT
+        if on_bottom and on_left:
+            return HTBOTTOMLEFT
+        if on_bottom and on_right:
+            return HTBOTTOMRIGHT
+        if on_left:
+            return HTLEFT
+        if on_right:
+            return HTRIGHT
+        if on_top:
+            return HTTOP
+        if on_bottom:
+            return HTBOTTOM
+        return None
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.LeftButton and event.position().y() <= 136:

@@ -1647,6 +1647,8 @@ class RegionDetailDialog(QDialog):
         self.processing_options = processing_options or RemovalOptions()
         self._updating_controls = False
         self._updating_brush_controls = False
+        self._applying_output_mask = False
+        self.output_mask_source_region = self.region.copy()
         self.output_mask_strength = DEFAULT_OUTPUT_MASK_STRENGTH
         self.pixmap = QPixmap(str(image_path))
 
@@ -1985,25 +1987,36 @@ class RegionDetailDialog(QDialog):
 
     def _handle_canvas_region_changed(self, region: NamedRegion) -> None:
         self.region = region.copy()
+        if not self._applying_output_mask:
+            self.output_mask_source_region = self.region.copy()
         self._sync_controls_from_region()
 
     def _handle_name_changed(self, text: str) -> None:
         if self._updating_controls:
             return
 
-        self.region.name = text.strip() or "region"
-        self.mask_canvas.set_region(self.region)
+        name = text.strip() or "region"
+        self.region.name = name
+        self.output_mask_source_region.name = name
+        self._applying_output_mask = True
+        try:
+            self.mask_canvas.set_region(self.region)
+        finally:
+            self._applying_output_mask = False
 
     def _reset_region(self) -> None:
         self.region = self.original_region.copy()
+        self.output_mask_source_region = self.region.copy()
         self.mask_canvas.set_region(self.region, record=True)
         self._sync_controls_from_region()
 
     def _apply_output_result_mask(self) -> None:
+        source_region = self.output_mask_source_region.copy()
+        source_region.name = self.region.name
         try:
             next_region = output_result_region_from_image(
                 self.image_path,
-                self.region,
+                source_region,
                 self.processing_options,
                 strength=self.output_mask_strength,
             )
@@ -2013,7 +2026,11 @@ class RegionDetailDialog(QDialog):
 
         next_region.name = self.region.name
         self.region = next_region.copy()
-        self.mask_canvas.set_region(self.region, record=True)
+        self._applying_output_mask = True
+        try:
+            self.mask_canvas.set_region(self.region, record=True)
+        finally:
+            self._applying_output_mask = False
         self._sync_controls_from_region()
 
     def result_region(self) -> NamedRegion:

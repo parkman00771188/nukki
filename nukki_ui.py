@@ -48,6 +48,8 @@ from remove_signature_background import (
     process_image_regions,
     sanitize_output_stem,
 )
+from nukki_updater import ensure_local_version_file
+from startup_update_dialog import StartupUpdateDialog
 
 
 class NativePoint(ctypes.Structure):
@@ -94,7 +96,7 @@ IMAGE_FILE_DIALOG_FILTER = (
     "*.tif *.tiff *.ico *.ppm *.pgm *.pbm *.pnm *.tga *.avif);;All files (*)"
 )
 OUTPUT_HISTORY_LIMIT = 6
-APP_VERSION = "v1.0.0"
+APP_VERSION = f"v{ensure_local_version_file()}"
 DEFAULT_OPTIONS_VERSION = 2
 RESOURCE_ALIASES = {
     "icon_folder_select_white.png": "nukki(1).png",
@@ -2679,6 +2681,12 @@ def main() -> None:
 
     app = QApplication(sys.argv)
     app.setFont(QFont("Malgun Gothic", 10))
+
+    update_dialog = StartupUpdateDialog()
+    update_dialog.exec()
+    if update_dialog.should_exit_for_update:
+        sys.exit(0)
+
     window = NukkiWindow()
     window.show()
     sys.exit(app.exec())

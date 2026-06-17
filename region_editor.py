@@ -40,7 +40,7 @@ CANVAS_MARGIN = 8
 CANVAS_FRAME_OUTSET = 4
 DEFAULT_VIEWPORT_SIZE = QSize(1080, 760)
 MIN_ZOOM_FACTOR = 0.35
-MAX_ZOOM_FACTOR = 6.0
+MAX_ZOOM_FACTOR = 12.0
 ZOOM_STEP = 1.15
 
 
@@ -834,6 +834,10 @@ class RegionDetailCanvas(QFrame):
         self.brush_size = 28
         self.zoom_factor = 1.0
         self.base_viewport_size = QSize(640, 520)
+        self.pan_active = False
+        self.pan_start_global: QPoint | None = None
+        self.pan_start_horizontal = 0
+        self.pan_start_vertical = 0
         self.hover_image_point: tuple[int, int] | None = None
         self.stroke_active = False
         self.stroke_last_image_point: tuple[int, int] | None = None
@@ -992,6 +996,18 @@ class RegionDetailCanvas(QFrame):
             super().mousePressEvent(event)
             return
 
+        if event.button() == Qt.MouseButton.MiddleButton:
+            scroll_area = self._find_scroll_area()
+            if scroll_area is not None:
+                self.pan_active = True
+                self.pan_start_global = event.globalPosition().toPoint()
+                self.pan_start_horizontal = scroll_area.horizontalScrollBar().value()
+                self.pan_start_vertical = scroll_area.verticalScrollBar().value()
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                self.grabMouse(Qt.CursorShape.ClosedHandCursor)
+                event.accept()
+                return
+
         view_point = event.position().toPoint()
         if event.button() == Qt.MouseButton.RightButton and self.region.shape_key() == POLYGON_MODE:
             point_index = self._hit_polygon_point(view_point)
@@ -1048,6 +1064,11 @@ class RegionDetailCanvas(QFrame):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
+        if self.pan_active:
+            self._update_pan(event.globalPosition().toPoint())
+            event.accept()
+            return
+
         view_point = event.position().toPoint()
         image_point = self._view_point_to_image(view_point, clamp=True)
         self.hover_image_point = image_point if self.tool_mode in {"pen", "eraser"} else None
@@ -1083,6 +1104,11 @@ class RegionDetailCanvas(QFrame):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.MiddleButton and self.pan_active:
+            self._stop_pan()
+            event.accept()
+            return
+
         if self.stroke_active:
             self._commit_preview_mask()
             self.stroke_active = False
@@ -1522,6 +1548,25 @@ class RegionDetailCanvas(QFrame):
                 return parent
             parent = parent.parentWidget()
         return None
+
+    def _update_pan(self, global_point: QPoint) -> None:
+        if not self.pan_active or self.pan_start_global is None:
+            return
+
+        scroll_area = self._find_scroll_area()
+        if scroll_area is None:
+            self._stop_pan()
+            return
+
+        delta = global_point - self.pan_start_global
+        scroll_area.horizontalScrollBar().setValue(self.pan_start_horizontal - delta.x())
+        scroll_area.verticalScrollBar().setValue(self.pan_start_vertical - delta.y())
+
+    def _stop_pan(self) -> None:
+        self.pan_active = False
+        self.pan_start_global = None
+        self.releaseMouse()
+        self.unsetCursor()
 
     def _reposition_scrollbars(self, global_point: QPoint, anchor_ratio: tuple[float, float]) -> None:
         scroll_area = self._find_scroll_area()

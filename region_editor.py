@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
@@ -9,6 +10,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -17,6 +19,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
+    QSpinBox,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -550,6 +554,645 @@ class RegionCanvas(QFrame):
         vertical.setValue(max(vertical.minimum(), min(vertical.maximum(), target_y)))
 
 
+class RegionDetailCanvas(QFrame):
+    region_changed = Signal(object)
+
+    def __init__(self, image_path: Path, region: NamedRegion) -> None:
+        super().__init__()
+        self.image_path = image_path
+        self.pixmap = QPixmap(str(image_path))
+        self.region = region.copy()
+        self.drag_mode: str | None = None
+        self.drag_handle = ""
+        self.drag_point_index = -1
+        self.last_image_point: tuple[int, int] | None = None
+
+        self.setObjectName("detailMaskCanvas")
+        self.setMinimumSize(640, 520)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMouseTracking(True)
+        self._normalize_region()
+
+    def set_region(self, region: NamedRegion) -> None:
+        self.region = region.copy()
+        self._normalize_region()
+        self.update()
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.fillRect(self.rect(), QColor("#17151d"))
+
+        image_rect = self._image_rect()
+        if image_rect.isValid() and not self.pixmap.isNull():
+            painter.fillRect(image_rect.adjusted(-4, -4, 4, 4), QColor("#262230"))
+            painter.drawPixmap(image_rect, self.pixmap)
+
+            region_path = self._region_to_view_path(self.region)
+            if not region_path.isEmpty():
+                outside_path = QPainterPath()
+                outside_path.addRect(QRectF(image_rect))
+                outside_path = outside_path.subtracted(region_path)
+                painter.fillPath(outside_path, QColor(10, 8, 15, 125))
+
+                painter.setPen(QPen(QColor("#ffebe8"), 2.2))
+                painter.setBrush(QColor(255, 53, 53, 108))
+                painter.drawPath(region_path)
+                self._paint_handles(painter)
+
+        painter.end()
+        super().paintEvent(event)
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if self.pixmap.isNull():
+            super().mousePressEvent(event)
+            return
+
+        view_point = event.position().toPoint()
+        if event.button() == Qt.MouseButton.RightButton and self.region.shape_key() == POLYGON_MODE:
+            point_index = self._hit_polygon_point(view_point)
+            points = list(self.region.normalized_points(*self._image_size()))
+            if point_index >= 0 and len(points) > 3:
+                del points[point_index]
+                self._set_polygon_points(points)
+                self._emit_region_changed()
+                event.accept()
+                return
+
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+
+        handle = self._hit_rect_handle(view_point)
+        if handle:
+            self.drag_mode = "rect_handle"
+            self.drag_handle = handle
+            event.accept()
+            return
+
+        point_index = self._hit_polygon_point(view_point)
+        if point_index >= 0:
+            self.drag_mode = "polygon_point"
+            self.drag_point_index = point_index
+            event.accept()
+            return
+
+        if self._region_to_view_path(self.region).contains(QPointF(view_point)):
+            self.drag_mode = "move"
+            self.last_image_point = self._view_point_to_image(view_point, clamp=True)
+            event.accept()
+            return
+
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
+        view_point = event.position().toPoint()
+        image_point = self._view_point_to_image(view_point, clamp=True)
+
+        if self.drag_mode and image_point is not None:
+            if self.drag_mode == "rect_handle":
+                self._apply_rect_handle(self.drag_handle, image_point)
+            elif self.drag_mode == "polygon_point":
+                self._apply_polygon_point(self.drag_point_index, image_point)
+            elif self.drag_mode == "move" and self.last_image_point is not None:
+                dx = image_point[0] - self.last_image_point[0]
+                dy = image_point[1] - self.last_image_point[1]
+                applied_dx, applied_dy = self._move_region(dx, dy)
+                self.last_image_point = (
+                    self.last_image_point[0] + applied_dx,
+                    self.last_image_point[1] + applied_dy,
+                )
+
+            self._emit_region_changed()
+            event.accept()
+            return
+
+        self._update_hover_cursor(view_point)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        if self.drag_mode:
+            self.drag_mode = None
+            self.drag_handle = ""
+            self.drag_point_index = -1
+            self.last_image_point = None
+            self.unsetCursor()
+            event.accept()
+            return
+
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton and self.region.shape_key() == POLYGON_MODE:
+            edge_index = self._hit_polygon_edge(event.position().toPoint())
+            image_point = self._view_point_to_image(event.position().toPoint(), clamp=True)
+            if edge_index >= 0 and image_point is not None:
+                points = list(self.region.normalized_points(*self._image_size()))
+                points.insert(edge_index + 1, image_point)
+                self._set_polygon_points(points)
+                self._emit_region_changed()
+                event.accept()
+                return
+
+        super().mouseDoubleClickEvent(event)
+
+    def _emit_region_changed(self) -> None:
+        self.update()
+        self.region_changed.emit(self.region.copy())
+
+    def _image_size(self) -> tuple[int, int]:
+        return max(1, self.pixmap.width()), max(1, self.pixmap.height())
+
+    def _normalize_region(self) -> None:
+        width, height = self._image_size()
+        if self.region.shape_key() == POLYGON_MODE:
+            points = self.region.normalized_points(width, height)
+            self._set_polygon_points(points, emit=False)
+            return
+
+        left, top, right, bottom = self.region.normalized_box(width, height)
+        self.region = NamedRegion(
+            name=self.region.name,
+            left=left,
+            top=top,
+            right=right,
+            bottom=bottom,
+            shape=RECT_MODE,
+        )
+
+    def _image_rect(self) -> QRect:
+        if self.pixmap.isNull():
+            return QRect()
+
+        padding = 18
+        available_width = max(1, self.width() - padding * 2)
+        available_height = max(1, self.height() - padding * 2)
+        scale = min(available_width / max(1, self.pixmap.width()), available_height / max(1, self.pixmap.height()))
+        width = max(1, int(round(self.pixmap.width() * scale)))
+        height = max(1, int(round(self.pixmap.height() * scale)))
+        return QRect((self.width() - width) // 2, (self.height() - height) // 2, width, height)
+
+    def _view_point_to_image(self, point: QPoint, clamp: bool) -> tuple[int, int] | None:
+        rect = self._image_rect()
+        if not rect.isValid() or self.pixmap.isNull():
+            return None
+
+        if not clamp and not rect.contains(point):
+            return None
+
+        if clamp:
+            point = QPoint(
+                max(rect.left(), min(point.x(), rect.right())),
+                max(rect.top(), min(point.y(), rect.bottom())),
+            )
+
+        x_ratio = (point.x() - rect.x()) / max(1, rect.width())
+        y_ratio = (point.y() - rect.y()) / max(1, rect.height())
+        return (
+            max(0, min(self.pixmap.width() - 1, int(x_ratio * self.pixmap.width()))),
+            max(0, min(self.pixmap.height() - 1, int(y_ratio * self.pixmap.height()))),
+        )
+
+    def _image_point_to_view(self, point: tuple[int, int]) -> QPointF:
+        rect = self._image_rect()
+        if not rect.isValid() or self.pixmap.isNull():
+            return QPointF()
+
+        x_scale = rect.width() / max(1, self.pixmap.width())
+        y_scale = rect.height() / max(1, self.pixmap.height())
+        return QPointF(rect.x() + point[0] * x_scale, rect.y() + point[1] * y_scale)
+
+    def _region_to_view_path(self, region: NamedRegion) -> QPainterPath:
+        path = QPainterPath()
+        if self.pixmap.isNull():
+            return path
+
+        points = [self._image_point_to_view(point) for point in region.normalized_points(*self._image_size())]
+        if len(points) < 3:
+            return path
+
+        path.addPolygon(QPolygonF(points))
+        path.closeSubpath()
+        return path
+
+    def _rect_handle_points(self) -> dict[str, QPointF]:
+        if self.region.shape_key() != RECT_MODE:
+            return {}
+
+        width, height = self._image_size()
+        left, top, right, bottom = self.region.normalized_box(width, height)
+        right_point = max(left, right - 1)
+        bottom_point = max(top, bottom - 1)
+        mid_x = (left + right_point) // 2
+        mid_y = (top + bottom_point) // 2
+        return {
+            "left_top": self._image_point_to_view((left, top)),
+            "top": self._image_point_to_view((mid_x, top)),
+            "right_top": self._image_point_to_view((right_point, top)),
+            "right": self._image_point_to_view((right_point, mid_y)),
+            "right_bottom": self._image_point_to_view((right_point, bottom_point)),
+            "bottom": self._image_point_to_view((mid_x, bottom_point)),
+            "left_bottom": self._image_point_to_view((left, bottom_point)),
+            "left": self._image_point_to_view((left, mid_y)),
+        }
+
+    def _paint_handles(self, painter: QPainter) -> None:
+        painter.setPen(QPen(QColor("#ffffff"), 1.4))
+        painter.setBrush(QColor("#ff3535"))
+        if self.region.shape_key() == RECT_MODE:
+            for point in self._rect_handle_points().values():
+                painter.drawEllipse(point, 5.2, 5.2)
+            return
+
+        for point in self.region.normalized_points(*self._image_size()):
+            painter.drawEllipse(self._image_point_to_view(point), 5.2, 5.2)
+
+    def _hit_rect_handle(self, view_point: QPoint) -> str:
+        if self.region.shape_key() != RECT_MODE:
+            return ""
+
+        for name, point in self._rect_handle_points().items():
+            if abs(point.x() - view_point.x()) <= 11 and abs(point.y() - view_point.y()) <= 11:
+                return name
+        return ""
+
+    def _hit_polygon_point(self, view_point: QPoint) -> int:
+        if self.region.shape_key() != POLYGON_MODE:
+            return -1
+
+        for index, point in enumerate(self.region.normalized_points(*self._image_size())):
+            view = self._image_point_to_view(point)
+            if abs(view.x() - view_point.x()) <= 11 and abs(view.y() - view_point.y()) <= 11:
+                return index
+        return -1
+
+    def _hit_polygon_edge(self, view_point: QPoint) -> int:
+        points = self.region.normalized_points(*self._image_size())
+        if self.region.shape_key() != POLYGON_MODE or len(points) < 3:
+            return -1
+
+        view_points = [self._image_point_to_view(point) for point in points]
+        target = QPointF(view_point)
+        best_index = -1
+        best_distance = 14.0
+        for index, start in enumerate(view_points):
+            end = view_points[(index + 1) % len(view_points)]
+            distance = self._distance_to_segment(target, start, end)
+            if distance < best_distance:
+                best_distance = distance
+                best_index = index
+        return best_index
+
+    def _distance_to_segment(self, point: QPointF, start: QPointF, end: QPointF) -> float:
+        dx = end.x() - start.x()
+        dy = end.y() - start.y()
+        length_sq = dx * dx + dy * dy
+        if length_sq <= 0.0001:
+            return math.hypot(point.x() - start.x(), point.y() - start.y())
+
+        t = max(0.0, min(1.0, ((point.x() - start.x()) * dx + (point.y() - start.y()) * dy) / length_sq))
+        projection = QPointF(start.x() + t * dx, start.y() + t * dy)
+        return math.hypot(point.x() - projection.x(), point.y() - projection.y())
+
+    def _apply_rect_handle(self, handle: str, point: tuple[int, int]) -> None:
+        width, height = self._image_size()
+        left, top, right, bottom = self.region.normalized_box(width, height)
+        min_size = 8
+        x, y = point
+
+        if "left" in handle:
+            left = min(max(0, x), right - min_size)
+        if "right" in handle:
+            right = max(min(width, x + 1), left + min_size)
+        if "top" in handle:
+            top = min(max(0, y), bottom - min_size)
+        if "bottom" in handle:
+            bottom = max(min(height, y + 1), top + min_size)
+
+        self.region = NamedRegion(self.region.name, left, top, right, bottom, RECT_MODE)
+
+    def _apply_polygon_point(self, point_index: int, point: tuple[int, int]) -> None:
+        points = list(self.region.normalized_points(*self._image_size()))
+        if not (0 <= point_index < len(points)):
+            return
+
+        points[point_index] = point
+        if len(set(points)) < 3:
+            return
+        self._set_polygon_points(points)
+
+    def _move_region(self, dx: int, dy: int) -> tuple[int, int]:
+        if dx == 0 and dy == 0:
+            return 0, 0
+
+        width, height = self._image_size()
+        if self.region.shape_key() == POLYGON_MODE:
+            points = self.region.normalized_points(width, height)
+            min_x = min(point[0] for point in points)
+            max_x = max(point[0] for point in points)
+            min_y = min(point[1] for point in points)
+            max_y = max(point[1] for point in points)
+            dx = max(-min_x, min(dx, width - 1 - max_x))
+            dy = max(-min_y, min(dy, height - 1 - max_y))
+            self._set_polygon_points([(x + dx, y + dy) for x, y in points])
+            return dx, dy
+
+        left, top, right, bottom = self.region.normalized_box(width, height)
+        dx = max(-left, min(dx, width - right))
+        dy = max(-top, min(dy, height - bottom))
+        self.region = NamedRegion(self.region.name, left + dx, top + dy, right + dx, bottom + dy, RECT_MODE)
+        return dx, dy
+
+    def _set_polygon_points(self, points: list[tuple[int, int]], emit: bool = True) -> None:
+        width, height = self._image_size()
+        normalized = [
+            (max(0, min(int(x), width - 1)), max(0, min(int(y), height - 1)))
+            for x, y in points
+        ]
+        if len(normalized) < 3:
+            return
+
+        xs = [point[0] for point in normalized]
+        ys = [point[1] for point in normalized]
+        self.region = NamedRegion(
+            name=self.region.name,
+            left=min(xs),
+            top=min(ys),
+            right=max(xs) + 1,
+            bottom=max(ys) + 1,
+            shape=POLYGON_MODE,
+            points=tuple(normalized),
+        )
+        if emit:
+            self.update()
+
+    def _update_hover_cursor(self, view_point: QPoint) -> None:
+        if self._hit_rect_handle(view_point) or self._hit_polygon_point(view_point):
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+            return
+        if self._region_to_view_path(self.region).contains(QPointF(view_point)):
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            return
+        self.unsetCursor()
+
+
+class RegionDetailDialog(QDialog):
+    def __init__(self, image_path: Path, region: NamedRegion, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.image_path = image_path
+        self.original_region = region.copy()
+        self.region = region.copy()
+        self._updating_controls = False
+        self.pixmap = QPixmap(str(image_path))
+
+        self.setWindowTitle(f"영역 세부 설정 - {region.name}")
+        self.resize(1120, 760)
+
+        self._build_ui()
+        self._apply_styles()
+        self._sync_controls_from_region()
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(14)
+
+        title = QLabel("영역 세부 설정")
+        title.setObjectName("dialogTitle")
+
+        help_text = QLabel("붉은 영역이 처리 후 남길 마스킹 영역입니다. 미리보기에서 영역을 드래그하거나 오른쪽 좌표값으로 정밀하게 수정할 수 있습니다.")
+        help_text.setObjectName("helperText")
+        help_text.setWordWrap(True)
+
+        body = QHBoxLayout()
+        body.setSpacing(16)
+
+        self.mask_canvas = RegionDetailCanvas(self.image_path, self.region)
+        self.mask_canvas.region_changed.connect(self._handle_canvas_region_changed)
+
+        side_panel = QFrame()
+        side_panel.setObjectName("detailSidePanel")
+        side_layout = QVBoxLayout(side_panel)
+        side_layout.setContentsMargins(18, 18, 18, 18)
+        side_layout.setSpacing(12)
+
+        name_label = QLabel("이름")
+        name_label.setObjectName("fieldLabel")
+        self.name_input = QLineEdit()
+        self.name_input.textChanged.connect(self._handle_name_changed)
+
+        self.shape_label = QLabel("")
+        self.shape_label.setObjectName("helperText")
+        self.point_label = QLabel("")
+        self.point_label.setObjectName("helperText")
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+        self.left_spin = self._create_spin_box()
+        self.right_spin = self._create_spin_box()
+        self.top_spin = self._create_spin_box()
+        self.bottom_spin = self._create_spin_box()
+        grid.addWidget(self._field_label("X 시작"), 0, 0)
+        grid.addWidget(self.left_spin, 0, 1)
+        grid.addWidget(self._field_label("X 끝"), 1, 0)
+        grid.addWidget(self.right_spin, 1, 1)
+        grid.addWidget(self._field_label("Y 시작"), 2, 0)
+        grid.addWidget(self.top_spin, 2, 1)
+        grid.addWidget(self._field_label("Y 끝"), 3, 0)
+        grid.addWidget(self.bottom_spin, 3, 1)
+
+        reset_button = QPushButton("처음 영역으로 복원")
+        reset_button.clicked.connect(self._reset_region)
+
+        side_layout.addWidget(name_label)
+        side_layout.addWidget(self.name_input)
+        side_layout.addSpacing(4)
+        side_layout.addWidget(self.shape_label)
+        side_layout.addWidget(self.point_label)
+        side_layout.addSpacing(8)
+        side_layout.addLayout(grid)
+        side_layout.addSpacing(8)
+        side_layout.addWidget(reset_button)
+        side_layout.addStretch(1)
+
+        body.addWidget(self.mask_canvas, 1)
+        body.addWidget(side_panel, 0)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        root.addWidget(title)
+        root.addWidget(help_text)
+        root.addLayout(body, 1)
+        root.addWidget(buttons)
+
+    def _apply_styles(self) -> None:
+        self.setStyleSheet(
+            """
+            QDialog {
+                background: #1f1c28;
+                color: #f1eff7;
+                font-family: "Malgun Gothic";
+            }
+            #dialogTitle {
+                font: 800 22px "Malgun Gothic";
+                color: #ffffff;
+            }
+            #helperText {
+                color: #c4bed4;
+                font: 500 13px "Malgun Gothic";
+            }
+            #fieldLabel {
+                color: #ffffff;
+                font: 700 13px "Malgun Gothic";
+            }
+            #detailSidePanel {
+                background: #262230;
+                border: 1px solid #3a3348;
+                border-radius: 18px;
+                min-width: 300px;
+                max-width: 340px;
+            }
+            #detailMaskCanvas {
+                background: #17151d;
+                border: 1px solid #393348;
+                border-radius: 18px;
+            }
+            QLineEdit, QSpinBox {
+                background: #201c29;
+                border: 1px solid #4a435a;
+                border-radius: 10px;
+                color: #f3f1f9;
+                min-height: 34px;
+                padding: 0 10px;
+            }
+            QPushButton {
+                background: #302944;
+                border: 1px solid #5a4d79;
+                border-radius: 12px;
+                min-height: 38px;
+                color: #ffffff;
+                font: 600 14px "Malgun Gothic";
+                padding: 0 14px;
+            }
+            QPushButton:hover {
+                background: #3a3153;
+            }
+            QDialogButtonBox QPushButton {
+                min-width: 110px;
+            }
+            """
+        )
+
+    def _create_spin_box(self) -> QSpinBox:
+        spin_box = QSpinBox()
+        width = max(1, self.pixmap.width())
+        height = max(1, self.pixmap.height())
+        spin_box.setRange(0, max(width, height))
+        spin_box.valueChanged.connect(self._handle_spin_changed)
+        return spin_box
+
+    def _field_label(self, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("fieldLabel")
+        return label
+
+    def _sync_controls_from_region(self) -> None:
+        width = max(1, self.pixmap.width())
+        height = max(1, self.pixmap.height())
+        left, top, right, bottom = self.region.normalized_box(width, height)
+        shape_label = "다각형" if self.region.shape_key() == POLYGON_MODE else "사각형"
+        point_count = len(self.region.points) if self.region.shape_key() == POLYGON_MODE else 4
+
+        self._updating_controls = True
+        self.name_input.setText(self.region.name)
+        self.left_spin.setRange(0, max(0, width - 1))
+        self.right_spin.setRange(1, width)
+        self.top_spin.setRange(0, max(0, height - 1))
+        self.bottom_spin.setRange(1, height)
+        self.left_spin.setValue(left)
+        self.right_spin.setValue(right)
+        self.top_spin.setValue(top)
+        self.bottom_spin.setValue(bottom)
+        self.shape_label.setText(f"형태: {shape_label}")
+        self.point_label.setText(f"점 개수: {point_count}")
+        self._updating_controls = False
+
+    def _handle_canvas_region_changed(self, region: NamedRegion) -> None:
+        self.region = region.copy()
+        self._sync_controls_from_region()
+
+    def _handle_name_changed(self, text: str) -> None:
+        if self._updating_controls:
+            return
+
+        self.region.name = text.strip() or "region"
+        self.mask_canvas.set_region(self.region)
+
+    def _handle_spin_changed(self) -> None:
+        if self._updating_controls:
+            return
+
+        left = self.left_spin.value()
+        right = self.right_spin.value()
+        top = self.top_spin.value()
+        bottom = self.bottom_spin.value()
+        if right <= left:
+            right = left + 1
+        if bottom <= top:
+            bottom = top + 1
+
+        width = max(1, self.pixmap.width())
+        height = max(1, self.pixmap.height())
+        right = min(width, right)
+        bottom = min(height, bottom)
+
+        self.region = self._region_resized_to_box(self.region, left, top, right, bottom)
+        self.mask_canvas.set_region(self.region)
+        self._sync_controls_from_region()
+
+    def _region_resized_to_box(self, region: NamedRegion, left: int, top: int, right: int, bottom: int) -> NamedRegion:
+        if region.shape_key() != POLYGON_MODE:
+            return NamedRegion(region.name, left, top, right, bottom, RECT_MODE)
+
+        width = max(1, self.pixmap.width())
+        height = max(1, self.pixmap.height())
+        old_left, old_top, old_right, old_bottom = region.normalized_box(width, height)
+        old_width = max(1, old_right - old_left - 1)
+        old_height = max(1, old_bottom - old_top - 1)
+        new_width = max(1, right - left - 1)
+        new_height = max(1, bottom - top - 1)
+        points = []
+        for x, y in region.normalized_points(width, height):
+            x_ratio = (x - old_left) / old_width
+            y_ratio = (y - old_top) / old_height
+            points.append((int(round(left + x_ratio * new_width)), int(round(top + y_ratio * new_height))))
+
+        xs = [point[0] for point in points]
+        ys = [point[1] for point in points]
+        return NamedRegion(
+            name=region.name,
+            left=min(xs),
+            top=min(ys),
+            right=max(xs) + 1,
+            bottom=max(ys) + 1,
+            shape=POLYGON_MODE,
+            points=tuple(points),
+        )
+
+    def _reset_region(self) -> None:
+        self.region = self.original_region.copy()
+        self.mask_canvas.set_region(self.region)
+        self._sync_controls_from_region()
+
+    def result_region(self) -> NamedRegion:
+        name = self.name_input.text().strip() or self.region.name.strip() or "region"
+        self.region.name = name
+        return self.region.copy()
+
+
 class RegionEditorDialog(QDialog):
     def __init__(self, image_path: Path, regions: list[NamedRegion] | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -904,7 +1547,14 @@ class RegionEditorDialog(QDialog):
             QMessageBox.information(self, "영역 세부 설정", "먼저 영역을 선택해 주세요.")
             return
 
-        QMessageBox.information(self, "영역 세부 설정", self._region_detail_text(self.regions[index]))
+        dialog = RegionDetailDialog(self.image_path, self.regions[index], self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        self.regions[index] = dialog.result_region()
+        self._populate_region_list()
+        self.region_list.setCurrentRow(index)
+        self.canvas.refresh()
 
     def _rename_selected_region(self, text: str) -> None:
         index = self.region_list.currentRow()

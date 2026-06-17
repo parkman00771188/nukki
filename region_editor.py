@@ -661,6 +661,14 @@ class RegionEditorDialog(QDialog):
         self.name_input.setPlaceholderText("영역 이름")
         self.name_input.textChanged.connect(self._rename_selected_region)
 
+        name_label = QLabel("이름")
+        name_label.setObjectName("fieldLabel")
+
+        self.region_detail_button = QPushButton("영역 세부 설정")
+        self.region_detail_button.setObjectName("detailButton")
+        self.region_detail_button.clicked.connect(self._show_region_detail_settings)
+        self.region_detail_button.setEnabled(False)
+
         self.coordinate_label = QLabel("선택된 영역 없음")
         self.coordinate_label.setObjectName("helperText")
         self.coordinate_label.setWordWrap(True)
@@ -673,8 +681,9 @@ class RegionEditorDialog(QDialog):
 
         side_layout.addWidget(panel_title)
         side_layout.addWidget(self.region_list, 1)
-        side_layout.addWidget(QLabel("이름"))
+        side_layout.addWidget(name_label)
         side_layout.addWidget(self.name_input)
+        side_layout.addWidget(self.region_detail_button)
         side_layout.addWidget(self.coordinate_label)
         side_layout.addWidget(delete_button)
         side_layout.addWidget(clear_button)
@@ -717,6 +726,10 @@ class RegionEditorDialog(QDialog):
             #helperText {
                 color: #c4bed4;
                 font: 500 13px "Malgun Gothic";
+            }
+            #fieldLabel {
+                color: #ffffff;
+                font: 700 13px "Malgun Gothic";
             }
             #zoomChip {
                 background: #2a2537;
@@ -773,6 +786,15 @@ class RegionEditorDialog(QDialog):
             }
             QPushButton:hover, QToolButton#toolButton:hover {
                 background: #3a3153;
+            }
+            QPushButton:disabled {
+                background: #241f30;
+                border-color: #3a3348;
+                color: #777085;
+            }
+            QPushButton#detailButton {
+                margin-top: 2px;
+                margin-bottom: 2px;
             }
             QToolButton#toolButton {
                 min-width: 118px;
@@ -835,6 +857,17 @@ class RegionEditorDialog(QDialog):
         shape_label = "다각형" if region.shape_key() == POLYGON_MODE else "사각형"
         return f"[{shape_label}] {region.name}"
 
+    def _region_detail_text(self, region: NamedRegion) -> str:
+        shape_label = "다각형" if region.shape_key() == POLYGON_MODE else "사각형"
+        point_count = len(region.points) if region.shape_key() == POLYGON_MODE else 4
+        return (
+            f"이름: {region.name}\n"
+            f"형태: {shape_label}\n"
+            f"점 개수: {point_count}\n"
+            f"x: {region.left} - {region.right}\n"
+            f"y: {region.top} - {region.bottom}"
+        )
+
     def _handle_region_created(self, region: NamedRegion) -> None:
         self.regions.append(region)
         self._populate_region_list()
@@ -853,21 +886,25 @@ class RegionEditorDialog(QDialog):
         self.name_input.blockSignals(True)
         if 0 <= index < len(self.regions):
             region = self.regions[index]
-            shape_label = "다각형" if region.shape_key() == POLYGON_MODE else "사각형"
             self.name_input.setEnabled(True)
+            self.region_detail_button.setEnabled(True)
             self.name_input.setText(region.name)
-            point_count = len(region.points) if region.shape_key() == POLYGON_MODE else 4
-            self.coordinate_label.setText(
-                f"형태: {shape_label}\n"
-                f"점 개수: {point_count}\n"
-                f"x: {region.left} - {region.right}\n"
-                f"y: {region.top} - {region.bottom}"
-            )
+            detail_lines = self._region_detail_text(region).splitlines()
+            self.coordinate_label.setText("\n".join(detail_lines[1:]))
         else:
             self.name_input.setEnabled(False)
+            self.region_detail_button.setEnabled(False)
             self.name_input.clear()
             self.coordinate_label.setText("선택된 영역 없음")
         self.name_input.blockSignals(False)
+
+    def _show_region_detail_settings(self) -> None:
+        index = self.region_list.currentRow()
+        if not (0 <= index < len(self.regions)):
+            QMessageBox.information(self, "영역 세부 설정", "먼저 영역을 선택해 주세요.")
+            return
+
+        QMessageBox.information(self, "영역 세부 설정", self._region_detail_text(self.regions[index]))
 
     def _rename_selected_region(self, text: str) -> None:
         index = self.region_list.currentRow()

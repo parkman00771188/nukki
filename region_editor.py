@@ -42,6 +42,7 @@ DEFAULT_VIEWPORT_SIZE = QSize(1080, 760)
 MIN_ZOOM_FACTOR = 0.35
 MAX_ZOOM_FACTOR = 12.0
 ZOOM_STEP = 1.15
+DEFAULT_OUTPUT_MASK_STRENGTH = 50
 
 
 def load_rgba_array(image_path: Path) -> np.ndarray:
@@ -107,6 +108,14 @@ def mask_to_region_mask(mask: np.ndarray, name: str, fallback: NamedRegion) -> N
         shape=MASK_MODE,
         mask_png=encode_mask_png(alpha),
     )
+
+
+def options_for_output_mask_strength(options: RemovalOptions, strength: int) -> RemovalOptions:
+    strength = max(0, min(100, int(strength)))
+    delta = strength - DEFAULT_OUTPUT_MASK_STRENGTH
+    transparent_cutoff = max(1, min(96, int(round(options.transparent_cutoff + delta * 0.5))))
+    opaque_cutoff = max(transparent_cutoff + 8, min(240, int(round(options.opaque_cutoff + delta * 1.3))))
+    return replace(options, transparent_cutoff=transparent_cutoff, opaque_cutoff=opaque_cutoff, crop=False)
 
 
 def mask_to_region(mask: np.ndarray, name: str, fallback: NamedRegion) -> NamedRegion:
@@ -249,7 +258,12 @@ def auto_detect_region_from_image(image_path: Path, region: NamedRegion) -> Name
     return mask_to_region_mask(candidate, region.name, region)
 
 
-def output_result_region_from_image(image_path: Path, region: NamedRegion, options: RemovalOptions) -> NamedRegion:
+def output_result_region_from_image(
+    image_path: Path,
+    region: NamedRegion,
+    options: RemovalOptions,
+    strength: int = DEFAULT_OUTPUT_MASK_STRENGTH,
+) -> NamedRegion:
     with Image.open(image_path) as source:
         rgb_image = source.convert("RGB")
         width, height = rgb_image.size
@@ -259,7 +273,7 @@ def output_result_region_from_image(image_path: Path, region: NamedRegion, optio
 
         left, top, right, bottom = region.normalized_box(width, height)
         region_image = rgb_image.crop((left, top, right, bottom))
-        result, _ = remove_background_from_image(region_image, options=replace(options, crop=False))
+        result, _ = remove_background_from_image(region_image, options=options_for_output_mask_strength(options, strength))
         local_alpha = np.array(result.getchannel("A"), dtype=np.uint8)
         local_region_mask = current_mask[top:bottom, left:right]
         if local_region_mask.shape != local_alpha.shape:
@@ -767,14 +781,18 @@ class RegionCanvas(QFrame):
             return
 
         selected = mask > 0
-        fill = np.array([102, 208, 142, 72] if is_selected else [158, 140, 255, 56], dtype=np.uint8)
-        edge_fill = np.array([102, 208, 142, 235] if is_selected else [158, 140, 255, 220], dtype=np.uint8)
+        fill_color = np.array([102, 208, 142] if is_selected else [158, 140, 255], dtype=np.uint8)
+        edge_color = np.array([102, 208, 142] if is_selected else [158, 140, 255], dtype=np.uint8)
+        fill_alpha = 72 if is_selected else 56
         overlay = np.zeros((height, width, 4), dtype=np.uint8)
-        overlay[selected] = fill
+        overlay[selected, :3] = fill_color
+        overlay[selected, 3] = (mask[selected].astype(np.uint16) * fill_alpha // 255).astype(np.uint8)
 
-        binary = selected.astype(np.uint8) * 255
+        binary = (mask >= 32).astype(np.uint8) * 255
         edge = cv2.morphologyEx(binary, cv2.MORPH_GRADIENT, np.ones((3, 3), dtype=np.uint8))
-        overlay[edge > 0] = edge_fill
+        edge_area = edge > 0
+        overlay[edge_area, :3] = edge_color
+        overlay[edge_area, 3] = np.maximum(overlay[edge_area, 3], 160)
 
         overlay = np.ascontiguousarray(overlay)
         image = QImage(overlay.data, width, height, width * 4, QImage.Format.Format_RGBA8888).copy()
@@ -1329,12 +1347,13 @@ class RegionDetailCanvas(QFrame):
         overlay[selected, 0] = 255
         overlay[selected, 1] = 53
         overlay[selected, 2] = 53
-        overlay[selected, 3] = np.maximum(96, (mask[selected].astype(np.uint16) * 110 // 255).astype(np.uint8))
+        overlay[selected, 3] = (mask[selected].astype(np.uint16) * 118 // 255).astype(np.uint8)
 
         if not self.stroke_active:
-            binary = selected.astype(np.uint8) * 255
-            edge = cv2.morphologyEx(binary, cv2.MORPH_GRADIENT, np.ones((3, 3), dtype=np.uint8))
-            overlay[edge > 0] = np.array([255, 235, 232, 235], dtype=np.uint8)
+            edge = cv2.morphologyEx(mask, cv2.MORPH_GRADIENT, np.ones((3, 3), dtype=np.uint8))
+            edge_area = edge >= 24
+            overlay[edge_area, :3] = np.array([255, 235, 232], dtype=np.uint8)
+            overlay[edge_area, 3] = np.maximum(overlay[edge_area, 3], np.minimum(235, edge[edge_area] + 72).astype(np.uint8))
 
         overlay = np.ascontiguousarray(overlay)
         image = QImage(overlay.data, width, height, width * 4, QImage.Format.Format_RGBA8888).copy()
@@ -1628,6 +1647,7 @@ class RegionDetailDialog(QDialog):
         self.processing_options = processing_options or RemovalOptions()
         self._updating_controls = False
         self._updating_brush_controls = False
+        self.output_mask_strength = DEFAULT_OUTPUT_MASK_STRENGTH
         self.pixmap = QPixmap(str(image_path))
 
         self.setWindowTitle(f"영역 세부 설정 - {region.name}")
@@ -1733,6 +1753,22 @@ class RegionDetailDialog(QDialog):
 
         reset_button = QPushButton("처음 영역으로 복원")
         reset_button.clicked.connect(self._reset_region)
+
+        strength_header = QHBoxLayout()
+        strength_label = QLabel("배경 제거 강도")
+        strength_label.setObjectName("fieldLabel")
+        self.output_mask_strength_label = QLabel(f"{self.output_mask_strength}%")
+        self.output_mask_strength_label.setObjectName("strengthValueLabel")
+        strength_header.addWidget(strength_label)
+        strength_header.addStretch(1)
+        strength_header.addWidget(self.output_mask_strength_label)
+
+        self.output_mask_strength_slider = QSlider(Qt.Orientation.Horizontal)
+        self.output_mask_strength_slider.setObjectName("outputMaskStrengthSlider")
+        self.output_mask_strength_slider.setRange(0, 100)
+        self.output_mask_strength_slider.setValue(self.output_mask_strength)
+        self.output_mask_strength_slider.valueChanged.connect(self._handle_output_mask_strength_changed)
+
         output_mask_button = QPushButton("출력 결과 마스킹 적용")
         output_mask_button.setObjectName("outputMaskButton")
         output_mask_button.clicked.connect(self._apply_output_result_mask)
@@ -1744,6 +1780,9 @@ class RegionDetailDialog(QDialog):
         side_layout.addWidget(self.point_label)
         side_layout.addSpacing(8)
         side_layout.addWidget(reset_button)
+        side_layout.addSpacing(8)
+        side_layout.addLayout(strength_header)
+        side_layout.addWidget(self.output_mask_strength_slider)
         side_layout.addWidget(output_mask_button)
         side_layout.addStretch(1)
 
@@ -1789,6 +1828,10 @@ class RegionDetailDialog(QDialog):
             }
             #fieldLabel {
                 color: #ffffff;
+                font: 700 13px "Malgun Gothic";
+            }
+            #strengthValueLabel {
+                color: #ffb385;
                 font: 700 13px "Malgun Gothic";
             }
             #detailSidePanel {
@@ -1852,16 +1895,22 @@ class RegionDetailDialog(QDialog):
                 min-width: 180px;
                 max-width: 220px;
             }
-            QSlider#brushSizeSlider::groove:horizontal {
+            QSlider#outputMaskStrengthSlider {
+                min-width: 220px;
+            }
+            QSlider#brushSizeSlider::groove:horizontal,
+            QSlider#outputMaskStrengthSlider::groove:horizontal {
                 height: 6px;
                 background: #393348;
                 border-radius: 3px;
             }
-            QSlider#brushSizeSlider::sub-page:horizontal {
+            QSlider#brushSizeSlider::sub-page:horizontal,
+            QSlider#outputMaskStrengthSlider::sub-page:horizontal {
                 background: #ff5a13;
                 border-radius: 3px;
             }
-            QSlider#brushSizeSlider::handle:horizontal {
+            QSlider#brushSizeSlider::handle:horizontal,
+            QSlider#outputMaskStrengthSlider::handle:horizontal {
                 width: 16px;
                 height: 16px;
                 margin: -6px 0;
@@ -1903,6 +1952,10 @@ class RegionDetailDialog(QDialog):
         self.brush_size_spin.setValue(value)
         self._updating_brush_controls = False
         self.mask_canvas.set_brush_size(value)
+
+    def _handle_output_mask_strength_changed(self, value: int) -> None:
+        self.output_mask_strength = max(0, min(100, int(value)))
+        self.output_mask_strength_label.setText(f"{self.output_mask_strength}%")
 
     def _update_canvas_viewport_reference(self) -> None:
         if not hasattr(self, "mask_scroll"):
@@ -1948,7 +2001,12 @@ class RegionDetailDialog(QDialog):
 
     def _apply_output_result_mask(self) -> None:
         try:
-            next_region = output_result_region_from_image(self.image_path, self.region, self.processing_options)
+            next_region = output_result_region_from_image(
+                self.image_path,
+                self.region,
+                self.processing_options,
+                strength=self.output_mask_strength,
+            )
         except Exception as exc:
             QMessageBox.warning(self, "출력 결과 마스킹 적용", f"출력 결과 마스크를 만들지 못했습니다.\n{exc}")
             return

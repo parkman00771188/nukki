@@ -2457,7 +2457,7 @@ class NukkiWindow(QMainWindow):
     def open_region_editor(self, path_str: str) -> None:
         source_path = Path(path_str)
         existing = self.region_configs.get(str(source_path), [])
-        dialog = RegionEditorDialog(source_path, existing, self)
+        dialog = RegionEditorDialog(source_path, existing, self, processing_options=self.build_options())
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 

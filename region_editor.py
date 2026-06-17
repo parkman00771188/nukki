@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 
@@ -14,7 +15,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from remove_signature_background import NamedRegion
+from remove_signature_background import NamedRegion, RemovalOptions, remove_background_from_image
 
 RECT_MODE = "rect"
 POLYGON_MODE = "polygon"
@@ -247,6 +247,32 @@ def auto_detect_region_from_image(image_path: Path, region: NamedRegion) -> Name
             candidate = grabcut_candidate
 
     return mask_to_region_mask(candidate, region.name, region)
+
+
+def output_result_region_from_image(image_path: Path, region: NamedRegion, options: RemovalOptions) -> NamedRegion:
+    with Image.open(image_path) as source:
+        rgb_image = source.convert("RGB")
+        width, height = rgb_image.size
+        current_mask = region_to_mask(region, width, height)
+        if int((current_mask > 0).sum()) < 12:
+            return region.copy()
+
+        left, top, right, bottom = region.normalized_box(width, height)
+        region_image = rgb_image.crop((left, top, right, bottom))
+        result, _ = remove_background_from_image(region_image, options=replace(options, crop=False))
+        local_alpha = np.array(result.getchannel("A"), dtype=np.uint8)
+        local_region_mask = current_mask[top:bottom, left:right]
+        if local_region_mask.shape != local_alpha.shape:
+            local_region_mask = cv2.resize(
+                local_region_mask,
+                (local_alpha.shape[1], local_alpha.shape[0]),
+                interpolation=cv2.INTER_LINEAR,
+            )
+
+        local_alpha = ((local_alpha.astype(np.uint16) * local_region_mask.astype(np.uint16)) // 255).astype(np.uint8)
+        output_mask = np.zeros((height, width), dtype=np.uint8)
+        output_mask[top:bottom, left:right] = local_alpha
+        return mask_to_region_mask(output_mask, region.name, region)
 
 
 def grabcut_region_mask(rgba: np.ndarray, region: NamedRegion, current_mask: np.ndarray) -> np.ndarray:
@@ -1588,11 +1614,18 @@ class RegionDetailCanvas(QFrame):
 
 
 class RegionDetailDialog(QDialog):
-    def __init__(self, image_path: Path, region: NamedRegion, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        image_path: Path,
+        region: NamedRegion,
+        parent: QWidget | None = None,
+        processing_options: RemovalOptions | None = None,
+    ) -> None:
         super().__init__(parent)
         self.image_path = image_path
         self.original_region = region.copy()
         self.region = region.copy()
+        self.processing_options = processing_options or RemovalOptions()
         self._updating_controls = False
         self._updating_brush_controls = False
         self.pixmap = QPixmap(str(image_path))
@@ -1613,7 +1646,7 @@ class RegionDetailDialog(QDialog):
         title = QLabel("영역 세부 설정")
         title.setObjectName("dialogTitle")
 
-        help_text = QLabel("붉은 영역이 처리 후 남길 마스킹 영역입니다. 펜과 지우개, 브러시 크기, 오른쪽 좌표값으로 마스크를 정밀하게 수정할 수 있습니다.")
+        help_text = QLabel("붉은 영역이 처리 후 남길 마스킹 영역입니다. 펜과 지우개, 브러시 크기로 마스크를 정밀하게 수정할 수 있습니다.")
         help_text.setObjectName("helperText")
         help_text.setWordWrap(True)
 
@@ -1698,24 +1731,11 @@ class RegionDetailDialog(QDialog):
         self.point_label = QLabel("")
         self.point_label.setObjectName("helperText")
 
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(10)
-        self.left_spin = self._create_spin_box()
-        self.right_spin = self._create_spin_box()
-        self.top_spin = self._create_spin_box()
-        self.bottom_spin = self._create_spin_box()
-        grid.addWidget(self._field_label("X 시작"), 0, 0)
-        grid.addWidget(self.left_spin, 0, 1)
-        grid.addWidget(self._field_label("X 끝"), 1, 0)
-        grid.addWidget(self.right_spin, 1, 1)
-        grid.addWidget(self._field_label("Y 시작"), 2, 0)
-        grid.addWidget(self.top_spin, 2, 1)
-        grid.addWidget(self._field_label("Y 끝"), 3, 0)
-        grid.addWidget(self.bottom_spin, 3, 1)
-
         reset_button = QPushButton("처음 영역으로 복원")
         reset_button.clicked.connect(self._reset_region)
+        output_mask_button = QPushButton("출력 결과 마스킹 적용")
+        output_mask_button.setObjectName("outputMaskButton")
+        output_mask_button.clicked.connect(self._apply_output_result_mask)
 
         side_layout.addWidget(name_label)
         side_layout.addWidget(self.name_input)
@@ -1723,9 +1743,8 @@ class RegionDetailDialog(QDialog):
         side_layout.addWidget(self.shape_label)
         side_layout.addWidget(self.point_label)
         side_layout.addSpacing(8)
-        side_layout.addLayout(grid)
-        side_layout.addSpacing(8)
         side_layout.addWidget(reset_button)
+        side_layout.addWidget(output_mask_button)
         side_layout.addStretch(1)
 
         self.mask_scroll = QScrollArea()
@@ -1850,6 +1869,13 @@ class RegionDetailDialog(QDialog):
                 border: 2px solid #ffe0d2;
                 border-radius: 8px;
             }
+            QPushButton#outputMaskButton {
+                background: #4a345b;
+                border-color: #7b5ba0;
+            }
+            QPushButton#outputMaskButton:hover {
+                background: #563d6b;
+            }
             QSpinBox#brushSizeSpin {
                 max-width: 78px;
             }
@@ -1858,19 +1884,6 @@ class RegionDetailDialog(QDialog):
             }
             """
         )
-
-    def _create_spin_box(self) -> QSpinBox:
-        spin_box = QSpinBox()
-        width = max(1, self.pixmap.width())
-        height = max(1, self.pixmap.height())
-        spin_box.setRange(0, max(width, height))
-        spin_box.valueChanged.connect(self._handle_spin_changed)
-        return spin_box
-
-    def _field_label(self, text: str) -> QLabel:
-        label = QLabel(text)
-        label.setObjectName("fieldLabel")
-        return label
 
     def _set_detail_tool(self, mode: str) -> None:
         self.mask_canvas.set_tool_mode(mode)
@@ -1902,7 +1915,6 @@ class RegionDetailDialog(QDialog):
     def _sync_controls_from_region(self) -> None:
         width = max(1, self.pixmap.width())
         height = max(1, self.pixmap.height())
-        left, top, right, bottom = self.region.normalized_box(width, height)
         shape_key = self.region.shape_key()
         shape_label = "마스크" if shape_key == MASK_MODE else "다각형" if shape_key == POLYGON_MODE else "사각형"
         if shape_key == MASK_MODE:
@@ -1914,14 +1926,6 @@ class RegionDetailDialog(QDialog):
 
         self._updating_controls = True
         self.name_input.setText(self.region.name)
-        self.left_spin.setRange(0, max(0, width - 1))
-        self.right_spin.setRange(1, width)
-        self.top_spin.setRange(0, max(0, height - 1))
-        self.bottom_spin.setRange(1, height)
-        self.left_spin.setValue(left)
-        self.right_spin.setValue(right)
-        self.top_spin.setValue(top)
-        self.bottom_spin.setValue(bottom)
         self.shape_label.setText(f"형태: {shape_label}")
         self.point_label.setText(point_text)
         self._updating_controls = False
@@ -1937,72 +1941,20 @@ class RegionDetailDialog(QDialog):
         self.region.name = text.strip() or "region"
         self.mask_canvas.set_region(self.region)
 
-    def _handle_spin_changed(self) -> None:
-        if self._updating_controls:
-            return
-
-        left = self.left_spin.value()
-        right = self.right_spin.value()
-        top = self.top_spin.value()
-        bottom = self.bottom_spin.value()
-        if right <= left:
-            right = left + 1
-        if bottom <= top:
-            bottom = top + 1
-
-        width = max(1, self.pixmap.width())
-        height = max(1, self.pixmap.height())
-        right = min(width, right)
-        bottom = min(height, bottom)
-
-        self.region = self._region_resized_to_box(self.region, left, top, right, bottom)
+    def _reset_region(self) -> None:
+        self.region = self.original_region.copy()
         self.mask_canvas.set_region(self.region, record=True)
         self._sync_controls_from_region()
 
-    def _region_resized_to_box(self, region: NamedRegion, left: int, top: int, right: int, bottom: int) -> NamedRegion:
-        if region.shape_key() == MASK_MODE:
-            width = max(1, self.pixmap.width())
-            height = max(1, self.pixmap.height())
-            old_left, old_top, old_right, old_bottom = region.normalized_box(width, height)
-            mask = region_to_mask(region, width, height)
-            cropped = mask[old_top:old_bottom, old_left:old_right]
-            new_width = max(1, right - left)
-            new_height = max(1, bottom - top)
-            resized = cv2.resize(cropped, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
-            next_mask = np.zeros((height, width), dtype=np.uint8)
-            next_mask[top:bottom, left:right] = resized[: bottom - top, : right - left]
-            return mask_to_region_mask(next_mask, region.name, region)
+    def _apply_output_result_mask(self) -> None:
+        try:
+            next_region = output_result_region_from_image(self.image_path, self.region, self.processing_options)
+        except Exception as exc:
+            QMessageBox.warning(self, "출력 결과 마스킹 적용", f"출력 결과 마스크를 만들지 못했습니다.\n{exc}")
+            return
 
-        if region.shape_key() != POLYGON_MODE:
-            return NamedRegion(region.name, left, top, right, bottom, RECT_MODE)
-
-        width = max(1, self.pixmap.width())
-        height = max(1, self.pixmap.height())
-        old_left, old_top, old_right, old_bottom = region.normalized_box(width, height)
-        old_width = max(1, old_right - old_left - 1)
-        old_height = max(1, old_bottom - old_top - 1)
-        new_width = max(1, right - left - 1)
-        new_height = max(1, bottom - top - 1)
-        points = []
-        for x, y in region.normalized_points(width, height):
-            x_ratio = (x - old_left) / old_width
-            y_ratio = (y - old_top) / old_height
-            points.append((int(round(left + x_ratio * new_width)), int(round(top + y_ratio * new_height))))
-
-        xs = [point[0] for point in points]
-        ys = [point[1] for point in points]
-        return NamedRegion(
-            name=region.name,
-            left=min(xs),
-            top=min(ys),
-            right=max(xs) + 1,
-            bottom=max(ys) + 1,
-            shape=POLYGON_MODE,
-            points=tuple(points),
-        )
-
-    def _reset_region(self) -> None:
-        self.region = self.original_region.copy()
+        next_region.name = self.region.name
+        self.region = next_region.copy()
         self.mask_canvas.set_region(self.region, record=True)
         self._sync_controls_from_region()
 
@@ -2013,10 +1965,17 @@ class RegionDetailDialog(QDialog):
 
 
 class RegionEditorDialog(QDialog):
-    def __init__(self, image_path: Path, regions: list[NamedRegion] | None = None, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        image_path: Path,
+        regions: list[NamedRegion] | None = None,
+        parent: QWidget | None = None,
+        processing_options: RemovalOptions | None = None,
+    ) -> None:
         super().__init__(parent)
         self.image_path = image_path
         self.regions: list[NamedRegion] = [region.copy() for region in (regions or [])]
+        self.processing_options = processing_options or RemovalOptions()
 
         self.setWindowTitle(f"영역 편집 - {image_path.name}")
         self.setModal(True)
@@ -2368,7 +2327,7 @@ class RegionEditorDialog(QDialog):
             QMessageBox.information(self, "영역 세부 설정", "먼저 영역을 선택해 주세요.")
             return
 
-        dialog = RegionDetailDialog(self.image_path, self.regions[index], self)
+        dialog = RegionDetailDialog(self.image_path, self.regions[index], self, processing_options=self.processing_options)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
